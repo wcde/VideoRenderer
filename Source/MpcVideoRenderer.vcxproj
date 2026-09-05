@@ -60,6 +60,31 @@
       <PrecompiledHeaderFile>stdafx.h</PrecompiledHeaderFile>
     </ClCompile>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Platform)'=='x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(SolutionDir)external\tensorrt\include;$(SolutionDir)external\tensorrt\cuda_stub;$(SolutionDir)external\nvofapi;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="Interp\CudaDriver.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="Interp\NvofSceneDetector.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="Interp\TensorRTLoader.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="Interp\RifeInterpolator.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Interp\CudaDriver.h" />
+    <ClInclude Include="Interp\NvofSceneDetector.h" />
+    <ClInclude Include="Interp\TensorRTLoader.h" />
+    <ClInclude Include="Interp\RifeInterpolator.h" />
+  </ItemGroup>
   <ItemGroup>
     <ClCompile Include="csputils.cpp" />
     <ClCompile Include="CustomAllocator.cpp" />
@@ -115,6 +140,7 @@
     <ClInclude Include="D3DUtil\FontBitmap.h" />
     <ClInclude Include="FrameStats.h" />
     <ClInclude Include="Helper.h" />
+    <ClInclude Include="InterpolationSettings.h" />
     <ClInclude Include="IVideoRenderer.h" />
     <ClInclude Include="MediaSampleSideData.h" />
     <ClInclude Include="PropPage.h" />

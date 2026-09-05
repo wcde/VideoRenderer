@@ -22,7 +22,7 @@ CD /D %~dp0
 SET "TITLE=MPC Video Renderer"
 SET "PROJECT=MpcVideoRenderer"
 
-SET "MSBUILD_SWITCHES=/nologo /consoleloggerparameters:Verbosity=minimal /maxcpucount /nodeReuse:true"
+SET "MSBUILD_SWITCHES=/nologo /consoleloggerparameters:Verbosity=minimal /maxcpucount /nodeReuse:true /p:UseOfMfc=false"
 SET "BUILDTYPE=Build"
 SET "BUILDCFG=Release"
 SET "SUFFIX="
@@ -116,6 +116,13 @@ CALL :SubDetectSevenzipPath
 IF DEFINED SEVENZIP (
     IF EXIST "_bin\%PCKG_NAME%.zip" DEL "_bin\%PCKG_NAME%.zip"
 
+    SET "RIFE_README=_bin\rife2onnx-README.md"
+    COPY /Y ".\tools\rife2onnx\README.md" "!RIFE_README!" >NUL
+    IF !ERRORLEVEL! NEQ 0 (
+      CALL :SubMsg "ERROR" "Unable to prepare the RIFE converter documentation."
+      EXIT /B 1
+    )
+
     TITLE Creating archive %PCKG_NAME%.zip...
     START "7z" /B /WAIT "%SEVENZIP%" a -tzip -mx9 "_bin\%PCKG_NAME%.zip" ^
 .\_bin\Filter_x86%SUFFIX%\%PROJECT%.ax ^
@@ -125,11 +132,18 @@ IF DEFINED SEVENZIP (
 .\distrib\Uninstall_MPCVR_32.cmd ^
 .\distrib\Uninstall_MPCVR_64.cmd ^
 .\distrib\Reset_Settings.cmd ^
-.\Readme.md ^
+.\tools\rife2onnx\export_rife_onnx.py ^
+.\tools\rife2onnx\requirements.txt ^
+.\_bin\rife2onnx-README.md ^
+.\README.md ^
 .\history.txt ^
 .\LICENSE.txt
-    IF %ERRORLEVEL% NEQ 0 CALL :SubMsg "ERROR" "Unable to create %PCKG_NAME%.zip!"
-    EXIT /B %ERRORLEVEL%
+    SET "ARCHIVE_RESULT=!ERRORLEVEL!"
+    DEL "!RIFE_README!"
+    IF !ARCHIVE_RESULT! NEQ 0 (
+      CALL :SubMsg "ERROR" "Unable to create %PCKG_NAME%.zip!"
+      EXIT /B 1
+    )
     CALL :SubMsg "INFO" "%PCKG_NAME%.zip successfully created"
 )
 

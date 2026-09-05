@@ -22,6 +22,35 @@
     <Filter Include="SubPic">
       <UniqueIdentifier>{3575701a-6d18-4391-9ec1-9cefb63193ba}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Interp">
+      <UniqueIdentifier>{7c1f4e2a-9b8d-4a63-a1e5-2f0c6d8b3e91}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="Interp\CudaDriver.cpp">
+      <Filter>Interp</Filter>
+    </ClCompile>
+    <ClCompile Include="Interp\NvofSceneDetector.cpp">
+      <Filter>Interp</Filter>
+    </ClCompile>
+    <ClCompile Include="Interp\TensorRTLoader.cpp">
+      <Filter>Interp</Filter>
+    </ClCompile>
+    <ClInclude Include="Interp\CudaDriver.h">
+      <Filter>Interp</Filter>
+    </ClInclude>
+    <ClInclude Include="Interp\NvofSceneDetector.h">
+      <Filter>Interp</Filter>
+    </ClInclude>
+    <ClInclude Include="Interp\TensorRTLoader.h">
+      <Filter>Interp</Filter>
+    </ClInclude>
+    <ClCompile Include="Interp\RifeInterpolator.cpp">
+      <Filter>Interp</Filter>
+    </ClCompile>
+    <ClInclude Include="Interp\RifeInterpolator.h">
+      <Filter>Interp</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="stdafx.cpp">
@@ -132,6 +161,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Helper.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="InterpolationSettings.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="resource.h">

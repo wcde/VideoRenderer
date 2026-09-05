@@ -136,6 +136,9 @@ private:
 
 	bool m_bSetNewMediaTypeToInputPin = false;
 
+	// set when the video processor already reported the end of rendering for the current sample (frame interpolation)
+	bool m_bRenderEndDone = false;
+
 	CComPtr<ISubPicProvider>  m_pSubPicProvider;
 	CComPtr<ISubPicQueue>     m_pSubPicQueue;
 
@@ -154,6 +157,13 @@ public:
 
 	HRESULT BeginFlush() override;
 	HRESULT EndFlush() override;
+	HRESULT EndOfStream() override;
+	HRESULT SendEndOfStream() override;
+
+	HRESULT ShouldDrawSampleNow(IMediaSample* pMediaSample, REFERENCE_TIME* ptrStart, REFERENCE_TIME* ptrEnd) override;
+	void OnRenderEnd(IMediaSample* pMediaSample) override;
+	// called by the video processor right after the source frame of an interpolated group was presented
+	void OnFirstPresentDone();
 
 	void UpdateDisplayInfo();
 	void OnDisplayModeChange(const bool bReset = false);
@@ -270,6 +280,8 @@ public:
 	STDMETHODIMP_(void) SetSettings(const Settings_t& setings);
 
 	STDMETHODIMP SaveSettings();
+
+	STDMETHODIMP GetInterpolationStatus(std::wstring& str);
 
 	// ISubRender (DX9)
 	STDMETHODIMP SetCallback(ISubRenderCallback* cb) override;

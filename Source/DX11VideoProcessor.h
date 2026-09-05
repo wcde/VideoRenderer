@@ -32,6 +32,9 @@
 #include "D3DUtil/D3D11Geometry.h"
 #include "VideoProcessor.h"
 #include "SubPic/DX11SubPic.h"
+#ifdef _WIN64
+#include "Interp/RifeInterpolator.h"
+#endif
 
 #include <atomic>
 
@@ -161,8 +164,60 @@ private:
 	D3D11_VIDEO_FRAME_FORMAT m_SampleFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
 
 	CComPtr<IDXGIFactory1> m_pDXGIFactory1;
+	bool m_bGpuAdapterUnavailable = false;
+	bool m_bGpuAdapterChangePending = false;
+	bool m_bDecoderAdapterMismatch = false;
+
+	UINT ResolvePreferredAdapter(IDXGIAdapter** ppAdapter = nullptr);
+	std::wstring GpuSelectionStatus() const;
 
 	bool m_bSubPicWasRendered = false;
+
+#ifdef _WIN64
+	// RIFE frame interpolation
+	std::unique_ptr<CRifeInterpolator> m_pRife;
+	std::wstring m_strInterpStatus; // reason when m_pRife could not be created
+	std::wstring m_strInterpActiveModel;
+	struct {
+		Tex2D_t tex[2];              // the two most recent source frames, video size
+		REFERENCE_TIME rt[2] = {};
+		bool presented[2] = {};
+		int next = 0;                // index for the next frame
+		bool valid = false;          // tex[next ^ 1] holds a frame that can be paired
+	} m_InterpHist;
+	Tex2D_t m_TexInterpOut;
+	Tex2D_t* m_pInterpPresent = nullptr; // frame used by Process() while interpolating
+	int m_iInterpRotation = 0;
+	bool m_bInterpReady = false;
+	REFERENCE_TIME m_rtInterpNextOut = INVALID_TIME; // next output slot in display refresh rate mode
+	unsigned m_nInterpEosPresents = 0;
+	unsigned m_nInterpGenerated = 0;
+	unsigned m_nInterpPresented = 0;
+	unsigned m_nInterpPlanned = 0;
+	unsigned m_nInterpLateDrops = 0;
+	uint64_t m_interpErrorOsdStartTick = 0;
+
+	struct InterpSlot {
+		REFERENCE_TIME rt;
+		float timestep; // 0 = source frame
+	};
+
+	void InterpInit();
+	void InterpRelease();
+	void InterpUpdateTextures();
+	bool InterpActive() const;
+	const InterpProfile_t* InterpProfile() const;
+	int InterpProfileValue() const;
+	std::wstring InterpProfileModel() const;
+	std::wstring InterpProfileLabel() const;
+	bool InterpUsesDisplayRefresh() const;
+	int InterpEffectiveMultiplier(const REFERENCE_TIME rtFrameDur) const;
+	void BuildInterpSlots(const REFERENCE_TIME rtPrev, const REFERENCE_TIME rtCur, const REFERENCE_TIME rtFrameDur, std::vector<InterpSlot>& slots);
+	HRESULT ProduceVideoFrame(Tex2D_t& dst);
+	HRESULT ProcessSampleInterp(const REFERENCE_TIME rtCur, const REFERENCE_TIME rtFrameDur);
+	std::wstring InterpStatsLine();
+	HRESULT DrawInterpStatusOsd(ID3D11Texture2D* pRenderTarget);
+#endif
 
 	// AlphaBitmap
 	Tex2D_t m_TexAlphaBitmap;
@@ -296,6 +351,7 @@ private:
 
 public:
 	HRESULT SetDevice(ID3D11Device *pDevice, ID3D11DeviceContext *pContext);
+	HRESULT ApplyPreferredAdapter();
 	HRESULT InitSwapChain(bool bWindowChanged);
 
 	BOOL VerifyMediaType(const CMediaType* pmt) override;
@@ -330,6 +386,13 @@ public:
 
 	void Flush() override;
 
+#ifdef _WIN64
+	bool GetDoubleRate() override;
+	REFERENCE_TIME GetScheduleAdvance() override;
+	void PresentPending() override;
+	void GetInterpolationStatus(std::wstring& str) override;
+#endif
+
 	void ClearPreScaleShaders() override;
 	void ClearPostScaleShaders() override;
 
@@ -355,6 +418,10 @@ private:
 
 	void DrawSubtitles(ID3D11Texture2D* pRenderTarget);
 	HRESULT Process(ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, const bool second);
+	// resize and post-processing chain from a video-sized RGB texture to the render target
+	HRESULT ProcessTail(Tex2D_t* pInputTexture, const CRect& rSrc, const int rotation, ID3D11Texture2D* pRenderTarget, const CRect& dstRect);
+	// statistics and sync offset after a Present()
+	CRefTime AfterPresent(const REFERENCE_TIME rtStart);
 
 	HRESULT AlphaBlt(ID3D11ShaderResourceView* pShaderResource, ID3D11Texture2D* pRenderTarget,
 					 ID3D11Buffer* pVertexBuffer, D3D11_VIEWPORT* pViewPort,

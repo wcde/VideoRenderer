@@ -96,6 +96,12 @@ STDMETHODIMP CVideoRendererInputPin::GetAllocatorRequirements(ALLOCATOR_PROPERTI
 STDMETHODIMP CVideoRendererInputPin::ReceiveConnection(IPin* pConnector, const AM_MEDIA_TYPE* pmt)
 {
 	DLog(L"CVideoRendererInputPin::ReceiveConnection()");
+	if (!m_Connected && !m_bD3D11 && m_pBaseRenderer->m_VideoProcessor->Type() == VP_DX11) {
+		if (auto pDX11VP = dynamic_cast<CDX11VideoProcessor*>(m_pBaseRenderer->m_VideoProcessor.get())) {
+			const HRESULT hr = pDX11VP->ApplyPreferredAdapter();
+			DLogIf(FAILED(hr), L"CVideoRendererInputPin::ReceiveConnection() : failed to apply the preferred GPU adapter with error {}", HR2Str(hr));
+		}
+	}
 
 	CAutoLock cObjectLock(m_pLock);
 
@@ -198,7 +204,7 @@ STDMETHODIMP CVideoRendererInputPin::ActivateD3D11Decoding(ID3D11Device *pDevice
 
 UINT STDMETHODCALLTYPE CVideoRendererInputPin::GetD3D11AdapterIndex()
 {
-	return m_pBaseRenderer->m_VideoProcessor->GetCurrentAdapter();
+	return m_pBaseRenderer->m_VideoProcessor->GetPreferredAdapter();
 }
 
 void CVideoRendererInputPin::SetNewMediaType(const CMediaType& mt)

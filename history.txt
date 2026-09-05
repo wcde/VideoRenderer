@@ -1,5 +1,6 @@
 0.10.8 dev
 ------------------------
+Added RIFE frame interpolation on NVIDIA TensorRT for Direct3D 11 (x64 only): ONNX models are converted to TensorRT engines by the renderer, fixed multiplier and display refresh rate modes, a new "Frame interpolation" settings page and Tools/rife2onnx for Practical-RIFE PyTorch models.
 Added the ability to get the original frame size using IExFilterConfig::Flt_GetInt64("originalVideoSize").
 Fixed the initial inactivity of the "Apply" button.
 Recommended MPC-BE 1.9.1.12 or newer.
