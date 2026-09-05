@@ -125,7 +125,10 @@ IF DEFINED SEVENZIP (
 .\distrib\Uninstall_MPCVR_32.cmd ^
 .\distrib\Uninstall_MPCVR_64.cmd ^
 .\distrib\Reset_Settings.cmd ^
-.\Readme.md ^
+.\tools\rife2onnx\export_rife_onnx.py ^
+.\tools\rife2onnx\requirements.txt ^
+.\tools\rife2onnx\README.md ^
+.\README.md ^
 .\history.txt ^
 .\LICENSE.txt
     IF %ERRORLEVEL% NEQ 0 CALL :SubMsg "ERROR" "Unable to create %PCKG_NAME%.zip!"

@@ -264,7 +264,9 @@ inline constexpr D3DCOLOR XMFLOAT4toD3DCOLOR(const DirectX::XMFLOAT4& colorRGBAf
 		(D3DCOLOR)std::clamp(int(colorRGBAf.w * 255), 0, 255) << 24;
 }
 
-UINT GetAdapter(HWND hWnd, IDXGIFactory1* pDXGIFactory, IDXGIAdapter** ppDXGIAdapter);
+UINT GetAdapter(HWND hWnd, IDXGIFactory1* pDXGIFactory, int preferredAdapter,
+	IDXGIAdapter** ppDXGIAdapter, bool* pPreferredUnavailable = nullptr);
+UINT FindAdapterIndex(IDXGIFactory1* pDXGIFactory, const LUID& luid);
 
 HRESULT DumpTexture2D(ID3D11DeviceContext* pDeviceContext, ID3D11Texture2D* pTexture2D, const wchar_t* filename);
 

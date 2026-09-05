@@ -24,6 +24,7 @@
 #include <evr.h> // for MR_VIDEO_ACCELERATION_SERVICE, because the <mfapi.h> does not contain it
 #include <Mferror.h>
 #include "Helper.h"
+#include "InterpolationSettings.h"
 #include "PropPage.h"
 #include "VideoRendererInputPin.h"
 #include "../Include/Version.h"
@@ -68,6 +69,11 @@
 #define OPT_ConvertToSdr                   L"ConvertToSdr"
 #define OPT_UseD3DFullscreen               L"UseD3DFullscreen"
 #define OPT_DisplayNits                    L"DisplayNits"
+#define OPT_InterpFP16                     L"InterpolationFP16"
+#define OPT_InterpPadMultiple              L"InterpolationPadMultiple"
+#define OPT_InterpModel                    L"InterpolationModel"
+#define OPT_InterpTrtDir                   L"InterpolationTensorRTDir"
+#define OPT_GpuAdapter                     L"GPUAdapter"
 
 static std::atomic_int g_nInstance = 0;
 static const wchar_t g_szClassName[] = L"VRWindow";
@@ -272,6 +278,29 @@ CMpcVideoRenderer::CMpcVideoRenderer(LPUNKNOWN pUnk, HRESULT* phr)
 		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DisplayNits, dw)) {
 			m_Sets.iSDRDisplayNits = discard<int>(dw, SDR_NITS_DEF, SDR_NITS_MIN, SDR_NITS_MAX);
 		}
+#ifdef _WIN64
+		interp_settings::Load(key, m_Sets, IsValidInterpProfileValue);
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_InterpFP16, dw)) {
+			m_Sets.bInterpFP16 = !!dw;
+		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_InterpPadMultiple, dw)) {
+			m_Sets.iInterpPadMultiple = (dw == 32 || dw == 64 || dw == 128) ? dw : 0;
+		}
+		wchar_t strbuf[1024];
+		ULONG strlen = (ULONG)std::size(strbuf);
+		if (ERROR_SUCCESS == key.QueryStringValue(OPT_InterpModel, strbuf, &strlen)) {
+			m_Sets.strInterpModel = strbuf;
+		}
+		strlen = (ULONG)std::size(strbuf);
+		if (ERROR_SUCCESS == key.QueryStringValue(OPT_InterpTrtDir, strbuf, &strlen)) {
+			m_Sets.strInterpTrtDir = strbuf;
+		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_GpuAdapter, dw)) {
+			m_Sets.iGpuAdapter = dw == MAXDWORD
+				? GPU_ADAPTER_AUTO
+				: discard<int>(static_cast<int>(dw), GPU_ADAPTER_AUTO, 0, 255);
+		}
+#endif
 	}
 
 	if (!IsWindows10OrGreater()) {
@@ -356,6 +385,56 @@ HRESULT CMpcVideoRenderer::EndFlush()
 	m_bFlushing = false;
 
 	return hr;
+}
+
+HRESULT CMpcVideoRenderer::EndOfStream()
+{
+	DLog(L"CMpcVideoRenderer::EndOfStream()");
+
+	return __super::EndOfStream();
+}
+
+HRESULT CMpcVideoRenderer::SendEndOfStream()
+{
+	// EndOfStream can arrive while the final DirectShow sample is still scheduled.
+	// SendEndOfStream is called again after that sample has actually rendered, so
+	// this is the first point where the interpolation history is guaranteed current.
+	if (IsEndOfStream()) {
+		m_VideoProcessor->PresentPending();
+	}
+
+	return __super::SendEndOfStream();
+}
+
+HRESULT CMpcVideoRenderer::ShouldDrawSampleNow(IMediaSample* pMediaSample, REFERENCE_TIME* ptrStart, REFERENCE_TIME* ptrEnd)
+{
+	// Frame interpolation needs the next frame before the current one is presented:
+	// schedule the sample one frame earlier, the processor presents everything at the proper time.
+	const REFERENCE_TIME advance = m_VideoProcessor->GetScheduleAdvance();
+	if (advance > 0 && *ptrStart > advance) {
+		*ptrStart -= advance;
+		*ptrEnd -= advance;
+	}
+
+	return __super::ShouldDrawSampleNow(pMediaSample, ptrStart, ptrEnd);
+}
+
+void CMpcVideoRenderer::OnRenderEnd(IMediaSample* pMediaSample)
+{
+	if (m_bRenderEndDone) {
+		// the render time was already measured after the source frame, the interpolated frames must not inflate it
+		m_bRenderEndDone = false;
+		return;
+	}
+	__super::OnRenderEnd(pMediaSample);
+}
+
+void CMpcVideoRenderer::OnFirstPresentDone()
+{
+	if (m_filterState == State_Running && !m_bRenderEndDone) {
+		__super::OnRenderEnd(m_pMediaSample);
+		m_bRenderEndDone = true;
+	}
 }
 
 long CMpcVideoRenderer::CalcImageSize(CMediaType& mt, bool redefine_mt)
@@ -1221,16 +1300,24 @@ STDMETHODIMP CMpcVideoRenderer::GetPages(CAUUID* pPages)
 
 	static const GUID guidQualityPPage = { 0x565DCEF2, 0xAFC5, 0x11D2, 0x88, 0x53, 0x00, 0x00, 0xF8, 0x08, 0x83, 0xE3 };
 
+#ifdef _WIN64
+	pPages->cElems = GetActive() ? 4 : 2;
+#else
 	pPages->cElems = GetActive() ? 3 : 1;
+#endif
 	pPages->pElems = static_cast<GUID*>(CoTaskMemAlloc(sizeof(GUID) * pPages->cElems));
 	if (pPages->pElems == nullptr) {
 		return E_OUTOFMEMORY;
 	}
 
-	pPages->pElems[0] = __uuidof(CVRMainPPage);
-	if (pPages->cElems == 3) {
-		pPages->pElems[1] = __uuidof(CVRInfoPPage);
-		pPages->pElems[2] = guidQualityPPage;
+	ULONG idx = 0;
+	pPages->pElems[idx++] = __uuidof(CVRMainPPage);
+#ifdef _WIN64
+	pPages->pElems[idx++] = __uuidof(CVRInterpPPage);
+#endif
+	if (GetActive()) {
+		pPages->pElems[idx++] = __uuidof(CVRInfoPPage);
+		pPages->pElems[idx++] = guidQualityPPage;
 	}
 
 	return S_OK;
@@ -1258,6 +1345,8 @@ STDMETHODIMP_(void) CMpcVideoRenderer::SetSettings(const Settings_t& setings)
 	CAutoLock cRendererLock(&m_RendererLock);
 
 	m_Sets = setings;
+	m_Sets.iInterpSceneThreshold = std::clamp(m_Sets.iInterpSceneThreshold,
+		0, INTERP_SCENE_THRESHOLD_UI_MAX);
 	m_VideoProcessor->Configure(m_Sets);
 
 	if (m_State == State_Paused) {
@@ -1309,8 +1398,23 @@ STDMETHODIMP CMpcVideoRenderer::SaveSettings()
 		key.SetDWORDValue(OPT_HdrOsdBrightness,    m_Sets.iHdrOsdBrightness);
 		key.SetDWORDValue(OPT_ConvertToSdr,        m_Sets.bConvertToSdr);
 		key.SetDWORDValue(OPT_DisplayNits,         m_Sets.iSDRDisplayNits);
+#ifdef _WIN64
+		interp_settings::Save(key, m_Sets);
+		key.SetDWORDValue(OPT_InterpFP16,          m_Sets.bInterpFP16);
+		key.SetDWORDValue(OPT_InterpPadMultiple,   m_Sets.iInterpPadMultiple);
+		key.SetStringValue(OPT_InterpModel,        m_Sets.strInterpModel.c_str());
+		key.SetStringValue(OPT_InterpTrtDir,       m_Sets.strInterpTrtDir.c_str());
+		key.SetDWORDValue(OPT_GpuAdapter,          static_cast<DWORD>(m_Sets.iGpuAdapter));
+#endif
 	}
 
+	return S_OK;
+}
+
+STDMETHODIMP CMpcVideoRenderer::GetInterpolationStatus(std::wstring& str)
+{
+	CAutoLock cRendererLock(&m_RendererLock);
+	m_VideoProcessor->GetInterpolationStatus(str);
 	return S_OK;
 }
 
