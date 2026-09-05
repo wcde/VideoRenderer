@@ -78,11 +78,23 @@ D3D11_TEXTURE2D_DESC CreateTex2DDesc(const DXGI_FORMAT format, const UINT width,
 	return desc;
 }
 
-UINT GetAdapter(HWND hWnd, IDXGIFactory1* pDXGIFactory, IDXGIAdapter** ppDXGIAdapter)
+UINT GetAdapter(HWND hWnd, IDXGIFactory1* pDXGIFactory, const int preferredAdapter,
+	IDXGIAdapter** ppDXGIAdapter, bool* pPreferredUnavailable)
 {
 	*ppDXGIAdapter = nullptr;
+	if (pPreferredUnavailable) {
+		*pPreferredUnavailable = false;
+	}
 
 	CheckPointer(pDXGIFactory, 0);
+	if (preferredAdapter >= 0) {
+		if (SUCCEEDED(pDXGIFactory->EnumAdapters(static_cast<UINT>(preferredAdapter), ppDXGIAdapter))) {
+			return static_cast<UINT>(preferredAdapter);
+		}
+		if (pPreferredUnavailable) {
+			*pPreferredUnavailable = true;
+		}
+	}
 
 	const HMONITOR hMonitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
 
@@ -109,6 +121,23 @@ UINT GetAdapter(HWND hWnd, IDXGIFactory1* pDXGIFactory, IDXGIAdapter** ppDXGIAda
 	}
 
 	return 0;
+}
+
+UINT FindAdapterIndex(IDXGIFactory1* pDXGIFactory, const LUID& luid)
+{
+	CheckPointer(pDXGIFactory, UINT_MAX);
+
+	CComPtr<IDXGIAdapter> adapter;
+	for (UINT index = 0; pDXGIFactory->EnumAdapters(index, &adapter) != DXGI_ERROR_NOT_FOUND; ++index) {
+		DXGI_ADAPTER_DESC desc = {};
+		if (SUCCEEDED(adapter->GetDesc(&desc))
+				&& desc.AdapterLuid.HighPart == luid.HighPart
+				&& desc.AdapterLuid.LowPart == luid.LowPart) {
+			return index;
+		}
+		adapter.Release();
+	}
+	return UINT_MAX;
 }
 
 HRESULT DumpTexture2D(ID3D11DeviceContext* pDeviceContext, ID3D11Texture2D* pTexture2D, const wchar_t* filename)

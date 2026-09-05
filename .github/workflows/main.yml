@@ -1,24 +1,15 @@
-name: Build VideoRenderer
+name: Build and release RIFE
 
 on:
-  push:
-    paths-ignore:
-      - .github/workflows/main.yml
-      - '**.txt'
-      - '**.md'
-      - '**.cmd'
-      - '**.vcxproj.filters'
-  pull_request:
-    paths-ignore:
-      - .github/workflows/main.yml      
-      - '**.txt'
-      - '**.md'
-      - '**.cmd'
-      - '**.vcxproj.filters'
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
-  build:
+  build-and-release:
     runs-on: windows-2022
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
@@ -28,13 +19,47 @@ jobs:
           submodules: recursive
 
       - name: Build VideoRenderer
-        run: |
-          .\\build_mpcvr.cmd NoWait
+        run: .\build_mpcvr.cmd NoWait
         shell: pwsh
 
-      - name: Upload build artifacts
+      - name: Find release archive
+        id: archive
+        shell: pwsh
+        run: |
+          $archives = @(Get-ChildItem -Path "_bin/MpcVideoRenderer*.zip" -File)
+          if ($archives.Count -ne 1) {
+            throw "Expected exactly one release archive, found $($archives.Count)."
+          }
+          "path=$($archives[0].FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Prepare release metadata
+        id: release
+        shell: pwsh
+        run: |
+          $date = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
+          $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+          $tag = "rife-$date-$shortSha-$env:GITHUB_RUN_NUMBER-$env:GITHUB_RUN_ATTEMPT"
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "title=RIFE build $date ($shortSha)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: "MPC Video Renderer" 
-          path: _bin/MpcVideoRenderer*.zip
+          name: MPC-Video-Renderer-RIFE-${{ steps.release.outputs.tag }}
+          path: ${{ steps.archive.outputs.path }}
           compression-level: 0
+          if-no-files-found: error
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_TITLE: ${{ steps.release.outputs.title }}
+          RELEASE_ARCHIVE: ${{ steps.archive.outputs.path }}
+        run: |
+          gh release create $env:RELEASE_TAG $env:RELEASE_ARCHIVE `
+            --repo $env:GITHUB_REPOSITORY `
+            --target $env:GITHUB_SHA `
+            --title $env:RELEASE_TITLE `
+            --generate-notes

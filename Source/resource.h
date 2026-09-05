@@ -6,6 +6,9 @@
 #define IDD_INFOPROPPAGE                103
 #define IDS_MAINPROPPAGE_TITLE          104
 #define IDS_INFOPROPPAGE_TITLE          105
+#define IDD_INTERPPROPPAGE              106
+#define IDS_INTERPPROPPAGE_TITLE        107
+#define IDD_INTERPPROFILE_DIALOG        108
 #define IDF_DITHER_32X32_FLOAT16        401
 #define IDF_HLSL_ST2084                 501
 #define IDF_HLSL_HLG                    502
@@ -86,6 +89,10 @@
 #define IDF_PS_11_FINAL_PASS            880
 #define IDF_PS_11_FINAL_PASS_10         881
 #define IDF_PS_11_HDR10_TONEMAP         882
+#define IDF_CS_11_RIFE_PACK             890
+#define IDF_CS_11_RIFE_SCENE            891
+#define IDF_PS_11_RIFE_UNPACK           892
+#define IDF_VS_11_RIFE_QUAD             893
 #define IDF_PS_11_TEST                  900
 #define IDC_EDIT1                       1001
 #define IDC_EDIT2                       1002
@@ -117,6 +124,7 @@
 #define IDC_CHECK17                     1037
 #define IDC_CHECK18                     1038
 #define IDC_CHECK19                     1039
+#define IDC_CHECK20                     1040
 #define IDC_COMBO1                      1041
 #define IDC_COMBO2                      1042
 #define IDC_COMBO3                      1043
@@ -132,14 +140,36 @@
 #define IDC_COMBO10                     1063
 #define IDC_STATIC99                    1064
 #define IDC_STATIC100                   1065
+#define IDC_CHECK21                     1066
+#define IDC_COMBO11                     1067
+#define IDC_COMBO12                     1068
+#define IDC_EDIT3                       1069
+#define IDC_EDIT4                       1070
+#define IDC_EDIT5                       1071
+#define IDC_BUTTON2                     1072
+#define IDC_BUTTON3                     1073
+#define IDC_SLIDER3                     1074
+#define IDC_STATIC9                     1075
+#define IDC_COMBO13                     1076
+#define IDC_COMBO14                     1077
+#define IDC_COMBO15                     1078
+#define IDC_LIST1                       1079
+#define IDC_BUTTON4                     1080
+#define IDC_BUTTON5                     1081
+#define IDC_EDIT6                       1082
+#define IDC_EDIT7                       1083
+#define IDC_COMBO16                     1084
+#define IDC_EDIT8                       1085
+#define IDC_BUTTON6                     1086
+#define IDC_BUTTON7                     1087
 
 // Next default values for new objects
-// 
+//
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
-#define _APS_NEXT_RESOURCE_VALUE        106
+#define _APS_NEXT_RESOURCE_VALUE        109
 #define _APS_NEXT_COMMAND_VALUE         40001
-#define _APS_NEXT_CONTROL_VALUE         1065
+#define _APS_NEXT_CONTROL_VALUE         1088
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

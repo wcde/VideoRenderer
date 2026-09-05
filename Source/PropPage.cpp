@@ -23,6 +23,10 @@
 #include "Helper.h"
 #include "DisplayConfig.h"
 #include "PropPage.h"
+#ifdef _WIN64
+#include <shobjidl.h>
+#include <dxgi1_2.h>
+#endif
 
 void SetCursor(HWND hWnd, LPCWSTR lpCursorName)
 {
@@ -785,3 +789,525 @@ HRESULT CVRInfoPPage::OnActivate()
 
 	return S_OK;
 }
+
+#ifdef _WIN64
+
+// CVRInterpPPage
+
+namespace {
+
+constexpr UINT_PTR INTERP_STATUS_TIMER = 1;
+
+void PopulateInterpProfile(HWND hwnd, const int controlId)
+{
+	ComboBox_AddStringData(hwnd, controlId, L"Disable", INTERP_PROFILE_DISABLE);
+	ComboBox_AddStringData(hwnd, controlId, L"x2", INTERP_PROFILE_X2);
+	ComboBox_AddStringData(hwnd, controlId, L"x3", INTERP_PROFILE_X3);
+	ComboBox_AddStringData(hwnd, controlId, L"x4", INTERP_PROFILE_X4);
+	ComboBox_AddStringData(hwnd, controlId, L"Display refresh rate", INTERP_PROFILE_DISPLAY_REFRESH);
+}
+
+const wchar_t* InterpProfileOutputName(const int value)
+{
+	switch (value) {
+	case INTERP_PROFILE_DISABLE: return L"Disable";
+	case INTERP_PROFILE_X2: return L"x2";
+	case INTERP_PROFILE_X3: return L"x3";
+	case INTERP_PROFILE_X4: return L"x4";
+	case INTERP_PROFILE_DISPLAY_REFRESH: return L"Display refresh rate";
+	default: return L"Invalid";
+	}
+}
+
+void FitInterpProfileColumns(const HWND list)
+{
+	RECT rect = {};
+	if (!GetClientRect(list, &rect)) {
+		return;
+	}
+	const int width = rect.right - rect.left;
+	if (width <= 0) {
+		return;
+	}
+	const int resolutionWidth = width * 28 / 100;
+	const int outputWidth = width * 34 / 100;
+	ListView_SetColumnWidth(list, 0, resolutionWidth);
+	ListView_SetColumnWidth(list, 1, outputWidth);
+	ListView_SetColumnWidth(list, 2, width - resolutionWidth - outputWidth);
+}
+
+// Shows the common file/folder dialog and returns the selected path.
+bool PickPath(HWND hwndOwner, const bool folder, std::wstring& path)
+{
+	CComPtr<IFileOpenDialog> pDialog;
+	if (FAILED(pDialog.CoCreateInstance(CLSID_FileOpenDialog))) {
+		return false;
+	}
+	DWORD options = 0;
+	pDialog->GetOptions(&options);
+	options |= FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST;
+	if (folder) {
+		options |= FOS_PICKFOLDERS;
+	}
+	pDialog->SetOptions(options);
+	if (!folder) {
+		const COMDLG_FILTERSPEC filters[] = {
+			{ L"ONNX models (*.onnx)", L"*.onnx" },
+			{ L"All files (*.*)", L"*.*" },
+		};
+		pDialog->SetFileTypes((UINT)std::size(filters), filters);
+	}
+	if (FAILED(pDialog->Show(hwndOwner))) {
+		return false;
+	}
+	CComPtr<IShellItem> pItem;
+	if (FAILED(pDialog->GetResult(&pItem))) {
+		return false;
+	}
+	PWSTR pszPath = nullptr;
+	if (FAILED(pItem->GetDisplayName(SIGDN_FILESYSPATH, &pszPath))) {
+		return false;
+	}
+	path = pszPath;
+	CoTaskMemFree(pszPath);
+	return true;
+}
+
+std::wstring GetDlgItemString(CWindow& wnd, const int id)
+{
+	wchar_t buf[1024] = {};
+	wnd.GetDlgItemTextW(id, buf, (int)std::size(buf));
+	return buf;
+}
+
+std::wstring GetDlgItemString(HWND hwnd, const int id)
+{
+	const int length = GetWindowTextLengthW(GetDlgItem(hwnd, id));
+	std::wstring value(length + 1, L'\0');
+	if (length) {
+		GetDlgItemTextW(hwnd, id, value.data(), length + 1);
+	}
+	value.resize(length);
+	return value;
+}
+
+struct InterpProfileDialogData {
+	InterpProfile_t profile = { 1920, 1080, INTERP_PROFILE_X2, {} };
+	bool editing = false;
+};
+
+INT_PTR CALLBACK InterpProfileDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+	auto* data = reinterpret_cast<InterpProfileDialogData*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+	if (message == WM_INITDIALOG) {
+		data = reinterpret_cast<InterpProfileDialogData*>(lParam);
+		SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(data));
+		if (data->editing) {
+			SetWindowTextW(hwnd, L"Edit interpolation profile");
+		}
+		SetDlgItemInt(hwnd, IDC_EDIT6, data->profile.width, FALSE);
+		SetDlgItemInt(hwnd, IDC_EDIT7, data->profile.height, FALSE);
+		PopulateInterpProfile(hwnd, IDC_COMBO16);
+		ComboBox_SelectByItemData(hwnd, IDC_COMBO16, data->profile.output);
+		SetDlgItemTextW(hwnd, IDC_EDIT8, data->profile.model.c_str());
+		return TRUE;
+	}
+	if (message != WM_COMMAND || !data) {
+		return FALSE;
+	}
+	const int id = LOWORD(wParam);
+	if (id == IDC_BUTTON6 && HIWORD(wParam) == BN_CLICKED) {
+		std::wstring path;
+		if (PickPath(hwnd, false, path)) {
+			SetDlgItemTextW(hwnd, IDC_EDIT8, path.c_str());
+		}
+		return TRUE;
+	}
+	if (id == IDOK) {
+		BOOL widthValid = FALSE, heightValid = FALSE;
+		const UINT width = GetDlgItemInt(hwnd, IDC_EDIT6, &widthValid, FALSE);
+		const UINT height = GetDlgItemInt(hwnd, IDC_EDIT7, &heightValid, FALSE);
+		const LRESULT selection = SendDlgItemMessageW(hwnd, IDC_COMBO16, CB_GETCURSEL, 0, 0);
+		const int output = selection == CB_ERR ? -1
+			: static_cast<int>(SendDlgItemMessageW(hwnd, IDC_COMBO16, CB_GETITEMDATA, selection, 0));
+		if (!widthValid || !heightValid || width == 0 || height == 0 || width > 16384 || height > 16384
+				|| !IsValidInterpProfileValue(output)) {
+			MessageBoxW(hwnd, L"Enter a resolution from 1x1 to 16384x16384 and select an output mode.",
+				L"Invalid interpolation profile", MB_OK | MB_ICONWARNING);
+			return TRUE;
+		}
+		data->profile = { width, height, output, GetDlgItemString(hwnd, IDC_EDIT8) };
+		EndDialog(hwnd, IDOK);
+		return TRUE;
+	}
+	if (id == IDCANCEL) {
+		EndDialog(hwnd, IDCANCEL);
+		return TRUE;
+	}
+	return FALSE;
+}
+
+} // namespace
+
+CVRInterpPPage::CVRInterpPPage(LPUNKNOWN lpunk, HRESULT* phr) :
+	CBasePropertyPage(L"InterpProp", lpunk, IDD_INTERPPROPPAGE, IDS_INTERPPROPPAGE_TITLE)
+{
+	DLog(L"CVRInterpPPage()");
+}
+
+CVRInterpPPage::~CVRInterpPPage()
+{
+	DLog(L"~CVRInterpPPage()");
+}
+
+HRESULT CVRInterpPPage::OnConnect(IUnknown* pUnk)
+{
+	if (pUnk == nullptr) return E_POINTER;
+
+	m_pVideoRenderer = pUnk;
+	if (!m_pVideoRenderer) {
+		return E_NOINTERFACE;
+	}
+
+	return S_OK;
+}
+
+HRESULT CVRInterpPPage::OnDisconnect()
+{
+	if (m_pVideoRenderer == nullptr) {
+		return E_UNEXPECTED;
+	}
+
+	m_pVideoRenderer.Release();
+
+	return S_OK;
+}
+
+HRESULT CVRInterpPPage::OnActivate()
+{
+	// set m_hWnd for CWindow
+	m_hWnd = m_hwnd;
+
+	m_pVideoRenderer->GetSettings(m_SetsPP);
+	PopulateGpuAdapters();
+
+	PopulateInterpProfile(m_hWnd, IDC_COMBO11);
+	const HWND list = GetDlgItem(IDC_LIST1);
+	ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+	LVCOLUMNW column = { LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM };
+	column.pszText = const_cast<LPWSTR>(L"Resolution");
+	column.cx = 0;
+	ListView_InsertColumn(list, 0, &column);
+	column.pszText = const_cast<LPWSTR>(L"Output");
+	column.iSubItem = 1;
+	ListView_InsertColumn(list, 1, &column);
+	column.pszText = const_cast<LPWSTR>(L"Model");
+	column.iSubItem = 2;
+	ListView_InsertColumn(list, 2, &column);
+
+	SendDlgItemMessageW(IDC_SLIDER3, TBM_SETRANGE, 0, MAKELONG(0, INTERP_SCENE_THRESHOLD_UI_MAX));
+	SendDlgItemMessageW(IDC_SLIDER3, TBM_SETTIC, 0, 10);
+	SendDlgItemMessageW(IDC_SLIDER3, TBM_SETLINESIZE, 0, 1);
+	SendDlgItemMessageW(IDC_SLIDER3, TBM_SETPAGESIZE, 0, 10);
+
+	SetControls();
+	UpdateStatus();
+
+	SetCursor(m_hWnd, IDC_ARROW);
+	SetTimer(INTERP_STATUS_TIMER, 1000);
+
+	m_bActivated = true;
+
+	return S_OK;
+}
+
+HRESULT CVRInterpPPage::OnDeactivate()
+{
+	m_bActivated = false;
+	KillTimer(INTERP_STATUS_TIMER);
+
+	return S_OK;
+}
+
+void CVRInterpPPage::SetControls()
+{
+	CheckDlgButton(IDC_CHECK20, m_SetsPP.bInterp ? BST_CHECKED : BST_UNCHECKED);
+	ComboBox_SelectByItemData(m_hWnd, IDC_COMBO13, static_cast<LONG_PTR>(m_SetsPP.iGpuAdapter) + 1);
+	ComboBox_SelectByItemData(m_hWnd, IDC_COMBO11, m_SetsPP.iInterpDefaultOutput);
+	UpdateProfileList();
+	SetDlgItemTextW(IDC_EDIT3, m_SetsPP.strInterpModel.c_str());
+	SetDlgItemTextW(IDC_EDIT4, m_SetsPP.strInterpTrtDir.c_str());
+	CheckDlgButton(IDC_CHECK21, m_SetsPP.bInterpFP16 ? BST_CHECKED : BST_UNCHECKED);
+	SendDlgItemMessageW(IDC_SLIDER3, TBM_SETPOS, 1, m_SetsPP.iInterpSceneThreshold);
+	SetDlgItemTextW(IDC_STATIC9, std::format(L"{}", m_SetsPP.iInterpSceneThreshold).c_str());
+
+	EnableControls();
+}
+
+void CVRInterpPPage::UpdateProfileList()
+{
+	const HWND list = GetDlgItem(IDC_LIST1);
+	ListView_DeleteAllItems(list);
+	for (size_t i = 0; i < m_SetsPP.interpProfiles.size(); ++i) {
+		const auto& profile = m_SetsPP.interpProfiles[i];
+		const std::wstring resolution = std::format(L"{} x {}", profile.width, profile.height);
+		LVITEMW item = {};
+		item.mask = LVIF_TEXT | LVIF_PARAM;
+		item.iItem = static_cast<int>(i);
+		item.pszText = const_cast<LPWSTR>(resolution.c_str());
+		item.lParam = static_cast<LPARAM>(i);
+		const int row = ListView_InsertItem(list, &item);
+		ListView_SetItemText(list, row, 1, const_cast<LPWSTR>(InterpProfileOutputName(profile.output)));
+		const size_t separator = profile.model.find_last_of(L"\\/");
+		const wchar_t* model = profile.model.empty() ? L"(default)"
+			: profile.model.c_str() + (separator == std::wstring::npos ? 0 : separator + 1);
+		ListView_SetItemText(list, row, 2, const_cast<LPWSTR>(model));
+	}
+	FitInterpProfileColumns(list);
+	EnableControls();
+}
+
+void CVRInterpPPage::PopulateGpuAdapters()
+{
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO13, L"Automatic (GPU driving the display)", 0);
+	bool selectedAvailable = m_SetsPP.iGpuAdapter == GPU_ADAPTER_AUTO;
+
+	CComPtr<IDXGIFactory1> factory;
+	if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+		CComPtr<IDXGIAdapter1> adapter;
+		for (UINT index = 0; factory->EnumAdapters1(index, &adapter) != DXGI_ERROR_NOT_FOUND; ++index) {
+			DXGI_ADAPTER_DESC1 desc = {};
+			if (SUCCEEDED(adapter->GetDesc1(&desc))
+					&& desc.VendorId == PCIV_NVIDIA
+					&& !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {
+				ComboBox_AddStringData(m_hWnd, IDC_COMBO13,
+					std::format(L"DXGI {}: {}", index, desc.Description).c_str(), static_cast<LONG_PTR>(index) + 1);
+				selectedAvailable = selectedAvailable || m_SetsPP.iGpuAdapter == static_cast<int>(index);
+			}
+			adapter.Release();
+		}
+	}
+
+	if (!selectedAvailable) {
+		ComboBox_AddStringData(m_hWnd, IDC_COMBO13,
+			std::format(L"DXGI {}: unavailable", m_SetsPP.iGpuAdapter).c_str(),
+			static_cast<LONG_PTR>(m_SetsPP.iGpuAdapter) + 1);
+	}
+}
+
+void CVRInterpPPage::EnableControls()
+{
+	const BOOL bEnable = m_SetsPP.bInterp;
+	for (const int id : { IDC_LIST1, IDC_BUTTON4, IDC_EDIT3, IDC_BUTTON2, IDC_EDIT4, IDC_BUTTON3, IDC_CHECK21, IDC_SLIDER3, IDC_STATIC9 }) {
+		GetDlgItem(id).EnableWindow(bEnable);
+	}
+	GetDlgItem(IDC_COMBO11).EnableWindow(bEnable && m_SetsPP.interpProfiles.empty());
+	const int selected = ListView_GetNextItem(GetDlgItem(IDC_LIST1), -1, LVNI_SELECTED);
+	GetDlgItem(IDC_BUTTON7).EnableWindow(bEnable && selected >= 0);
+	GetDlgItem(IDC_BUTTON5).EnableWindow(bEnable && selected >= 0);
+}
+
+void CVRInterpPPage::UpdateStatus()
+{
+	std::wstring str;
+	if (m_pVideoRenderer) {
+		m_pVideoRenderer->GetInterpolationStatus(str);
+	}
+	str_replace(str, L"\n", L"\r\n");
+	if (str != m_strStatus) {
+		m_strStatus = str;
+		SetDlgItemTextW(IDC_EDIT5, str.c_str());
+	}
+}
+
+void CVRInterpPPage::BrowseModel()
+{
+	std::wstring path;
+	if (PickPath(m_hWnd, false, path)) {
+		SetDlgItemTextW(IDC_EDIT3, path.c_str()); // EN_CHANGE updates the settings
+	}
+}
+
+void CVRInterpPPage::BrowseTrtDir()
+{
+	std::wstring path;
+	if (PickPath(m_hWnd, true, path)) {
+		SetDlgItemTextW(IDC_EDIT4, path.c_str());
+	}
+}
+
+void CVRInterpPPage::AddProfile()
+{
+	InterpProfileDialogData data;
+	if (DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_INTERPPROFILE_DIALOG), m_hWnd,
+			InterpProfileDialogProc, reinterpret_cast<LPARAM>(&data)) != IDOK) {
+		return;
+	}
+	const bool duplicate = std::ranges::any_of(m_SetsPP.interpProfiles, [&data](const auto& profile) {
+		return profile.width == data.profile.width && profile.height == data.profile.height;
+	});
+	if (duplicate) {
+		MessageBoxW(std::format(L"An override for {}x{} already exists.", data.profile.width, data.profile.height).c_str(),
+			L"Duplicate interpolation profile", MB_OK | MB_ICONWARNING);
+		return;
+	}
+	m_SetsPP.interpProfiles.emplace_back(std::move(data.profile));
+	UpdateProfileList();
+	SetDirty();
+}
+
+void CVRInterpPPage::EditProfile()
+{
+	const HWND list = GetDlgItem(IDC_LIST1);
+	const int selected = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+	if (selected < 0 || static_cast<size_t>(selected) >= m_SetsPP.interpProfiles.size()) {
+		return;
+	}
+	InterpProfileDialogData data = { m_SetsPP.interpProfiles[selected], true };
+	if (DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_INTERPPROFILE_DIALOG), m_hWnd,
+			InterpProfileDialogProc, reinterpret_cast<LPARAM>(&data)) != IDOK) {
+		return;
+	}
+	bool duplicate = false;
+	for (size_t i = 0; i < m_SetsPP.interpProfiles.size(); ++i) {
+		const auto& profile = m_SetsPP.interpProfiles[i];
+		if (i != static_cast<size_t>(selected)
+				&& profile.width == data.profile.width && profile.height == data.profile.height) {
+			duplicate = true;
+			break;
+		}
+	}
+	if (duplicate) {
+		MessageBoxW(std::format(L"An override for {}x{} already exists.", data.profile.width, data.profile.height).c_str(),
+			L"Duplicate interpolation profile", MB_OK | MB_ICONWARNING);
+		return;
+	}
+	m_SetsPP.interpProfiles[selected] = std::move(data.profile);
+	UpdateProfileList();
+	ListView_SetItemState(list, selected, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+	SetDirty();
+}
+
+void CVRInterpPPage::DeleteProfile()
+{
+	const HWND list = GetDlgItem(IDC_LIST1);
+	const int selected = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+	if (selected < 0 || static_cast<size_t>(selected) >= m_SetsPP.interpProfiles.size()) {
+		return;
+	}
+	m_SetsPP.interpProfiles.erase(m_SetsPP.interpProfiles.begin() + selected);
+	UpdateProfileList();
+	SetDirty();
+}
+
+INT_PTR CVRInterpPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+	if (uMsg == WM_COMMAND) {
+		const int nID = LOWORD(wParam);
+		const int action = HIWORD(wParam);
+
+		if (action == BN_CLICKED) {
+			if (nID == IDC_CHECK20) {
+				m_SetsPP.bInterp = IsDlgButtonChecked(IDC_CHECK20) == BST_CHECKED;
+				EnableControls();
+				SetDirty();
+				return (LRESULT)1;
+			}
+			if (nID == IDC_CHECK21) {
+				m_SetsPP.bInterpFP16 = IsDlgButtonChecked(IDC_CHECK21) == BST_CHECKED;
+				SetDirty();
+				return (LRESULT)1;
+			}
+			if (nID == IDC_BUTTON2) {
+				BrowseModel();
+				return (LRESULT)1;
+			}
+			if (nID == IDC_BUTTON3) {
+				BrowseTrtDir();
+				return (LRESULT)1;
+			}
+			if (nID == IDC_BUTTON4) {
+				AddProfile();
+				return (LRESULT)1;
+			}
+			if (nID == IDC_BUTTON5) {
+				DeleteProfile();
+				return (LRESULT)1;
+			}
+			if (nID == IDC_BUTTON7) {
+				EditProfile();
+				return (LRESULT)1;
+			}
+		}
+		else if (action == CBN_SELCHANGE) {
+			if (nID == IDC_COMBO13) {
+				const LRESULT selection = SendDlgItemMessageW(IDC_COMBO13, CB_GETCURSEL, 0, 0);
+				if (selection != CB_ERR) {
+					const int adapter = static_cast<int>(SendDlgItemMessageW(IDC_COMBO13, CB_GETITEMDATA, selection, 0)) - 1;
+					if (adapter != m_SetsPP.iGpuAdapter) {
+						m_SetsPP.iGpuAdapter = adapter;
+						SetDirty();
+					}
+				}
+				return (LRESULT)1;
+			}
+			if (nID == IDC_COMBO11) {
+				const LRESULT selection = SendDlgItemMessageW(IDC_COMBO11, CB_GETCURSEL, 0, 0);
+				if (selection != CB_ERR) {
+					const int value = static_cast<int>(SendDlgItemMessageW(IDC_COMBO11, CB_GETITEMDATA, selection, 0));
+					if (IsValidInterpProfileValue(value) && value != m_SetsPP.iInterpDefaultOutput) {
+						m_SetsPP.iInterpDefaultOutput = value;
+						SetDirty();
+					}
+				}
+				return (LRESULT)1;
+			}
+		}
+		else if (action == EN_CHANGE && m_bActivated) {
+			if (nID == IDC_EDIT3) {
+				m_SetsPP.strInterpModel = GetDlgItemString(*this, IDC_EDIT3);
+				SetDirty();
+				return (LRESULT)1;
+			}
+			if (nID == IDC_EDIT4) {
+				m_SetsPP.strInterpTrtDir = GetDlgItemString(*this, IDC_EDIT4);
+				SetDirty();
+				return (LRESULT)1;
+			}
+		}
+	}
+	else if (uMsg == WM_NOTIFY && reinterpret_cast<NMHDR*>(lParam)->idFrom == IDC_LIST1
+			&& reinterpret_cast<NMHDR*>(lParam)->code == LVN_ITEMCHANGED) {
+		EnableControls();
+		return (LRESULT)1;
+	}
+	else if (uMsg == WM_HSCROLL) {
+		if ((HWND)lParam == GetDlgItem(IDC_SLIDER3)) {
+			const LRESULT lValue = SendDlgItemMessageW(IDC_SLIDER3, TBM_GETPOS, 0, 0);
+			if (lValue != m_SetsPP.iInterpSceneThreshold) {
+				m_SetsPP.iInterpSceneThreshold = (int)lValue;
+				SetDlgItemTextW(IDC_STATIC9, std::format(L"{}", lValue).c_str());
+				SetDirty();
+			}
+			return (LRESULT)1;
+		}
+	}
+	else if (uMsg == WM_TIMER && wParam == INTERP_STATUS_TIMER) {
+		UpdateStatus();
+		return (LRESULT)1;
+	}
+
+	// Let the parent class handle the message.
+	return CBasePropertyPage::OnReceiveMessage(hwnd, uMsg, wParam, lParam);
+}
+
+HRESULT CVRInterpPPage::OnApplyChanges()
+{
+	m_pVideoRenderer->SetSettings(m_SetsPP);
+	m_pVideoRenderer->SaveSettings();
+	UpdateStatus();
+
+	return S_OK;
+}
+
+#endif // _WIN64

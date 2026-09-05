@@ -22,7 +22,7 @@ CD /D %~dp0
 SET "TITLE=MPC Video Renderer"
 SET "PROJECT=MpcVideoRenderer"
 
-SET "MSBUILD_SWITCHES=/nologo /consoleloggerparameters:Verbosity=minimal /maxcpucount /nodeReuse:true"
+SET "MSBUILD_SWITCHES=/nologo /consoleloggerparameters:Verbosity=minimal /maxcpucount /nodeReuse:true /p:UseOfMfc=false"
 SET "BUILDTYPE=Build"
 SET "BUILDCFG=Release"
 SET "SUFFIX="
@@ -125,11 +125,14 @@ IF DEFINED SEVENZIP (
 .\distrib\Uninstall_MPCVR_32.cmd ^
 .\distrib\Uninstall_MPCVR_64.cmd ^
 .\distrib\Reset_Settings.cmd ^
-.\Readme.md ^
+.\README.md ^
 .\history.txt ^
 .\LICENSE.txt
-    IF %ERRORLEVEL% NEQ 0 CALL :SubMsg "ERROR" "Unable to create %PCKG_NAME%.zip!"
-    EXIT /B %ERRORLEVEL%
+    SET "ARCHIVE_RESULT=!ERRORLEVEL!"
+    IF !ARCHIVE_RESULT! NEQ 0 (
+      CALL :SubMsg "ERROR" "Unable to create %PCKG_NAME%.zip!"
+      EXIT /B 1
+    )
     CALL :SubMsg "INFO" "%PCKG_NAME%.zip successfully created"
 )
 
