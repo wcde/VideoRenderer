@@ -54,6 +54,18 @@
     <FxCompile Include="d3d11\vs_simple.hlsl">
       <Filter>d3d11</Filter>
     </FxCompile>
+    <FxCompile Include="d3d11\cs_rife_pack.hlsl">
+      <Filter>d3d11</Filter>
+    </FxCompile>
+    <FxCompile Include="d3d11\cs_rife_scene.hlsl">
+      <Filter>d3d11</Filter>
+    </FxCompile>
+    <FxCompile Include="d3d11\ps_rife_unpack.hlsl">
+      <Filter>d3d11</Filter>
+    </FxCompile>
+    <FxCompile Include="d3d11\vs_rife_quad.hlsl">
+      <Filter>d3d11</Filter>
+    </FxCompile>
     <FxCompile Include="d3d11\ps_fix_ycgco.hlsl">
       <Filter>d3d11</Filter>
     </FxCompile>

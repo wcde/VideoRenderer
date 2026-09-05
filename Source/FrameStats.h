@@ -149,6 +149,7 @@ struct CRenderStats {
 	//unsigned skipped_interval = 0;
 
 	uint64_t copyticks = 0;
+	uint64_t interpticks = 0;
 	uint64_t substicks = 0;
 	uint64_t paintticks = 0;
 	uint64_t presentticks = 0;

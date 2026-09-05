@@ -21,6 +21,7 @@
 #pragma once
 
 #include <dxva2api.h>
+#include <vector>
 
 enum :int {
 	TEXFMT_AUTOINT = 0,
@@ -85,6 +86,60 @@ enum :int {
 	HDRTD_OnOff
 };
 
+constexpr inline auto INTERP_MULT_MIN = 2;
+constexpr inline auto INTERP_MULT_MAX = 4;
+enum : int {
+	INTERP_PROFILE_DISABLE = 0,
+	INTERP_PROFILE_X2 = 2,
+	INTERP_PROFILE_X3 = 3,
+	INTERP_PROFILE_X4 = 4,
+	INTERP_PROFILE_DISPLAY_REFRESH = 5,
+};
+constexpr bool IsValidInterpProfileValue(const int value)
+{
+	return value == INTERP_PROFILE_DISABLE
+		|| value >= INTERP_PROFILE_X2 && value <= INTERP_PROFILE_X4
+		|| value == INTERP_PROFILE_DISPLAY_REFRESH;
+}
+
+constexpr inline int INTERP_SCENE_THRESHOLD_UI_MAX = 100;
+constexpr inline int INTERP_SCENE_THRESHOLD_UNITS_PER_PERCENT = 20;
+constexpr float InterpSceneThresholdRatio(const int value)
+{
+	const int clamped = value < 0 ? 0 : value > INTERP_SCENE_THRESHOLD_UI_MAX
+		? INTERP_SCENE_THRESHOLD_UI_MAX : value;
+	return static_cast<float>(clamped)
+		/ (100.0f * INTERP_SCENE_THRESHOLD_UNITS_PER_PERCENT);
+}
+
+struct InterpProfile_t {
+	UINT width = 0;
+	UINT height = 0;
+	int output = INTERP_PROFILE_X2;
+	std::wstring model; // empty = use the default ONNX model
+
+	bool operator==(const InterpProfile_t&) const = default;
+};
+
+inline const InterpProfile_t* FindNearestInterpProfile(
+		const std::vector<InterpProfile_t>& profiles, const unsigned long long pixels)
+{
+	const InterpProfile_t* best = nullptr;
+	unsigned long long bestPixels = 0;
+	unsigned long long bestDistance = 0;
+	for (const auto& profile : profiles) {
+		const unsigned long long profilePixels = static_cast<unsigned long long>(profile.width) * profile.height;
+		const unsigned long long distance = pixels > profilePixels ? pixels - profilePixels : profilePixels - pixels;
+		if (!best || distance < bestDistance || (distance == bestDistance && profilePixels < bestPixels)) {
+			best = &profile;
+			bestPixels = profilePixels;
+			bestDistance = distance;
+		}
+	}
+	return best;
+}
+constexpr inline int GPU_ADAPTER_AUTO = -1;
+
 #define SDR_NITS_DEF 125
 #define SDR_NITS_MIN  25
 #define SDR_NITS_MAX 400
@@ -132,6 +187,16 @@ struct Settings_t {
 	bool bHdrLocalToneMapping;
 	int  iHdrLocalToneMappingType;
 	int iHdrDisplayMaxNits;
+	// RIFE frame interpolation (Direct3D 11, x64, NVIDIA)
+	bool bInterp;
+	int  iInterpDefaultOutput;
+	std::vector<InterpProfile_t> interpProfiles;
+	bool bInterpFP16;
+	int  iInterpSceneThreshold; // UI scale 0..100, 20 units = one NVOFA inlier percent, 0 = off
+	int  iInterpPadMultiple;    // 0 = auto
+	std::wstring strInterpModel;
+	std::wstring strInterpTrtDir;
+	int  iGpuAdapter;           // DXGI adapter index, -1 = adapter driving the display
 
 	Settings_t() {
 		SetDefault();
@@ -182,6 +247,18 @@ struct Settings_t {
 		bConvertToSdr                   = true;
 		iHdrOsdBrightness               = 0;
 		iSDRDisplayNits                 = SDR_NITS_DEF;
+		bInterp                         = false;
+		iInterpDefaultOutput            = INTERP_PROFILE_X2;
+		interpProfiles                  = {
+			{ 1280, 720, INTERP_PROFILE_X2, {} }, { 1920, 1080, INTERP_PROFILE_X2, {} },
+			{ 2560, 1440, INTERP_PROFILE_X2, {} }, { 3840, 2160, INTERP_PROFILE_DISABLE, {} }
+		};
+		bInterpFP16                     = true;
+		iInterpSceneThreshold           = 25;
+		iInterpPadMultiple              = 0;
+		strInterpModel.clear();
+		strInterpTrtDir.clear();
+		iGpuAdapter                     = GPU_ADAPTER_AUTO;
 	}
 };
 
@@ -194,4 +271,6 @@ IVideoRenderer : public IUnknown {
 	STDMETHOD_(void, SetSettings(const Settings_t& setings)) PURE;
 
 	STDMETHOD(SaveSettings()) PURE;
+
+	STDMETHOD(GetInterpolationStatus) (std::wstring& str) PURE;
 };

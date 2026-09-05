@@ -71,6 +71,19 @@ protected:
 	int  m_iHdrOsdBrightness               = 0;
 	bool m_bConvertToSdr                   = true;
 	int  m_iSDRDisplayNits                 = SDR_NITS_DEF;
+	bool m_bInterp                         = false;
+	int  m_iInterpDefaultOutput            = INTERP_PROFILE_X2;
+	std::vector<InterpProfile_t> m_InterpProfiles = {
+		{ 1280, 720, INTERP_PROFILE_X2, {} }, { 1920, 1080, INTERP_PROFILE_X2, {} },
+		{ 2560, 1440, INTERP_PROFILE_X2, {} }, { 3840, 2160, INTERP_PROFILE_DISABLE, {} }
+	};
+	bool m_bInterpFP16                     = true;
+	int  m_iInterpSceneThreshold           = 25;
+	int  m_iInterpPadMultiple              = 0;
+	std::wstring m_strInterpModel;
+	std::wstring m_strInterpTrtDir;
+	int  m_iGpuAdapter                    = GPU_ADAPTER_AUTO;
+	int  m_iInterpFactor                   = 1; // presented frames per input frame while interpolating, 1 = inactive
 
 	bool m_bVPScalingUseShaders = false;
 
@@ -117,6 +130,7 @@ protected:
 
 	HWND m_hWnd = nullptr;
 	UINT m_nCurrentAdapter = {}; // redefine explicitly in subclasses
+	UINT m_nPreferredAdapter = {};
 	DWORD m_VendorId = 0;
 	std::wstring m_strAdapterDescription;
 
@@ -125,6 +139,7 @@ protected:
 	bool m_bDoubleFrames = false;
 
 	UINT32 m_uHalfRefreshPeriodMs = 0;
+	REFERENCE_TIME m_rtRefreshPeriod = 0;
 
 	bool m_bAllowDeepColorBitmaps = false;
 
@@ -174,6 +189,7 @@ public:
 
 	virtual IDirect3DDeviceManager9* GetDeviceManager9() { return nullptr; }
 	UINT GetCurrentAdapter() { return m_nCurrentAdapter; }
+	UINT GetPreferredAdapter() { return m_nPreferredAdapter; }
 
 	virtual BOOL VerifyMediaType(const CMediaType* pmt) = 0;
 	virtual BOOL InitMediaType(const CMediaType* pmt) = 0;
@@ -229,7 +245,12 @@ public:
 
 	void SetDisplayInfo(const DisplayConfig_t& dc, const bool primary, const bool exclusiveScreen);
 
-	bool GetDoubleRate() { return m_bDoubleFrames; }
+	virtual bool GetDoubleRate() { return m_bDoubleFrames; }
+
+	// frame interpolation (implemented by the Direct3D 11 processor on x64)
+	virtual REFERENCE_TIME GetScheduleAdvance() { return 0; }
+	virtual void PresentPending() {}
+	virtual void GetInterpolationStatus(std::wstring& str) { str = L"not available"; }
 
 	virtual ISubPicAllocator* GetSubPicAllocator() { return nullptr; }
 

@@ -103,6 +103,13 @@ IDF_PS_11_FINAL_PASS            FILE                    "..\\_bin\\shaders\\ps_f
 IDF_PS_11_FINAL_PASS_10         FILE                    "..\\_bin\\shaders\\ps_final_pass_10.cso"
 //IDF_PS_11_TEST                  FILE                    "..\\_bin\\shaders\\ps_TEST.cso"
 
+#ifdef _WIN64
+IDF_CS_11_RIFE_PACK             FILE                    "..\\_bin\\shaders\\cs_rife_pack.cso"
+IDF_CS_11_RIFE_SCENE            FILE                    "..\\_bin\\shaders\\cs_rife_scene.cso"
+IDF_PS_11_RIFE_UNPACK           FILE                    "..\\_bin\\shaders\\ps_rife_unpack.cso"
+IDF_VS_11_RIFE_QUAD             FILE                    "..\\_bin\\shaders\\vs_rife_quad.cso"
+#endif
+
 /////////////////////////////////////////////////////////////////////////////
 //
 // Version

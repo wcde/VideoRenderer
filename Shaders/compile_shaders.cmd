@@ -35,6 +35,11 @@ IF EXIST %fxcexe% GOTO fxc_OK
 SET fxcexe="%ProgramFiles(x86)%\Windows Kits\8.1\bin\%fxcfolder%\fxc.exe"
 IF EXIST %fxcexe% GOTO fxc_OK
 
+FOR /D %%D IN ("%ProgramFiles(x86)%\Windows Kits\10\bin\10.*") DO (
+  IF EXIST "%%~D\%fxcfolder%\fxc.exe" SET fxcexe="%%~D\%fxcfolder%\fxc.exe"
+)
+IF EXIST %fxcexe% GOTO fxc_OK
+
 SET fxcexe="fxc.exe"
 where /q %fxcexe%
 IF %ERRORLEVEL% EQU 0 goto fxc_Ok

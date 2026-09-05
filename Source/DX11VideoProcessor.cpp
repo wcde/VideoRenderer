@@ -409,8 +409,18 @@ CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Setti
 	m_iHdrOsdBrightness    = config.iHdrOsdBrightness;
 	m_bConvertToSdr        = config.bConvertToSdr;
 	m_iSDRDisplayNits      = config.iSDRDisplayNits;
+	m_bInterp              = config.bInterp;
+	m_iInterpDefaultOutput = config.iInterpDefaultOutput;
+	m_InterpProfiles       = config.interpProfiles;
+	m_bInterpFP16          = config.bInterpFP16;
+	m_iInterpSceneThreshold = config.iInterpSceneThreshold;
+	m_iInterpPadMultiple   = config.iInterpPadMultiple;
+	m_strInterpModel       = config.strInterpModel;
+	m_strInterpTrtDir      = config.strInterpTrtDir;
+	m_iGpuAdapter          = config.iGpuAdapter;
 
 	m_nCurrentAdapter = -1;
+	m_nPreferredAdapter = -1;
 
 	hr = CreateDXGIFactory1(IID_IDXGIFactory1, (void**)&m_pDXGIFactory1);
 	if (FAILED(hr)) {
@@ -545,6 +555,49 @@ void CDX11VideoProcessor::FillDisplayParams()
 	}
 }
 
+UINT CDX11VideoProcessor::ResolvePreferredAdapter(IDXGIAdapter** ppAdapter)
+{
+	CComPtr<IDXGIAdapter> adapter;
+	bool unavailable = false;
+	const UINT index = GetAdapter(m_hWnd, m_pDXGIFactory1, m_iGpuAdapter, &adapter, &unavailable);
+	m_bGpuAdapterUnavailable = unavailable;
+	m_nPreferredAdapter = index;
+	if (ppAdapter) {
+		*ppAdapter = adapter.Detach();
+	}
+	return index;
+}
+
+std::wstring CDX11VideoProcessor::GpuSelectionStatus() const
+{
+	if (m_bGpuAdapterUnavailable) {
+		return std::format(L"selected DXGI adapter {} is unavailable; using DXGI adapter {}",
+			m_iGpuAdapter, m_nCurrentAdapter);
+	}
+	if (m_bDecoderAdapterMismatch) {
+		return std::format(L"decoder supplied DXGI adapter {}; selected adapter is {}",
+			m_nCurrentAdapter, m_nPreferredAdapter);
+	}
+	if (m_bGpuAdapterChangePending) {
+		return std::format(L"GPU change to DXGI adapter {} is pending; reopen playback",
+			m_nPreferredAdapter);
+	}
+	return m_iGpuAdapter == GPU_ADAPTER_AUTO
+		? std::format(L"automatic GPU: DXGI adapter {}", m_nCurrentAdapter)
+		: std::format(L"selected GPU: DXGI adapter {}", m_nCurrentAdapter);
+}
+
+HRESULT CDX11VideoProcessor::ApplyPreferredAdapter()
+{
+	ResolvePreferredAdapter();
+	if (m_nCurrentAdapter == m_nPreferredAdapter && m_pDevice) {
+		m_bGpuAdapterChangePending = false;
+		m_bDecoderAdapterMismatch = false;
+		return S_OK;
+	}
+	return Init(m_hWnd, false);
+}
+
 HRESULT CDX11VideoProcessor::Init(const HWND hwnd, const bool displayHdrChanged, bool* pChangeDevice/* = nullptr*/)
 {
 	DLog(L"CDX11VideoProcessor::Init()");
@@ -559,10 +612,12 @@ HRESULT CDX11VideoProcessor::Init(const HWND hwnd, const bool displayHdrChanged,
 	}
 
 	IDXGIAdapter* pDXGIAdapter = nullptr;
-	const UINT currentAdapter = GetAdapter(hwnd, m_pDXGIFactory1, &pDXGIAdapter);
+	const UINT currentAdapter = ResolvePreferredAdapter(&pDXGIAdapter);
 	CheckPointer(pDXGIAdapter, E_FAIL);
 	if (m_nCurrentAdapter == currentAdapter) {
 		SAFE_RELEASE(pDXGIAdapter);
+		m_bGpuAdapterChangePending = false;
+		m_bDecoderAdapterMismatch = false;
 
 		SetCallbackDevice();
 
@@ -665,6 +720,21 @@ void CDX11VideoProcessor::ReleaseVP()
 	m_TexConvertOutput.Release();
 	m_TexResize.Release();
 	m_TexsPostScale.Release();
+#ifdef _WIN64
+	m_pInterpPresent = nullptr;
+	m_InterpHist.tex[0].Release();
+	m_InterpHist.tex[1].Release();
+	m_InterpHist.valid = false;
+	m_InterpHist.presented[0] = m_InterpHist.presented[1] = false;
+	m_TexInterpOut.Release();
+	m_bInterpReady = false;
+	m_iInterpFactor = 1;
+	m_nInterpEosPresents = 0;
+	m_nInterpGenerated = 0;
+	m_nInterpPresented = 0;
+	m_nInterpPlanned = 0;
+	m_nInterpLateDrops = 0;
+#endif
 
 	m_PSConvColorData.Release();
 	m_pDoviCurvesConstantBuffer.Release();
@@ -683,6 +753,9 @@ void CDX11VideoProcessor::ReleaseDevice()
 {
 	DLog(L"CDX11VideoProcessor::ReleaseDevice()");
 
+#ifdef _WIN64
+	InterpRelease();
+#endif
 	ReleaseVP();
 	m_D3D11VP.ReleaseVideoDevice();
 
@@ -1192,7 +1265,7 @@ void CDX11VideoProcessor::CalcStatsParams()
 		if (S_OK == m_Font3D.CreateFontBitmap(L"Consolas", m_StatsFontH, 0)) {
 			SIZE charSize = m_Font3D.GetMaxCharMetric();
 			m_StatsRect.right  = m_StatsRect.left + 61 * charSize.cx + 5 + 3;
-			m_StatsRect.bottom = m_StatsRect.top + 19 * charSize.cy + 5 + 3;
+			m_StatsRect.bottom = m_StatsRect.top + 20 * charSize.cy + 5 + 3;
 		}
 		m_StatsBackground.Set(m_StatsRect, rtSize, D3DCOLOR_ARGB(80, 0, 0, 0));
 
@@ -1298,6 +1371,12 @@ HRESULT CDX11VideoProcessor::SetDevice(ID3D11Device *pDevice, ID3D11DeviceContex
 	DXGI_ADAPTER_DESC dxgiAdapterDesc = {};
 	hr = pDXGIAdapter->GetDesc(&dxgiAdapterDesc);
 	if (SUCCEEDED(hr)) {
+		const UINT actualAdapter = FindAdapterIndex(m_pDXGIFactory1, dxgiAdapterDesc.AdapterLuid);
+		if (actualAdapter != UINT_MAX) {
+			m_nCurrentAdapter = actualAdapter;
+		}
+		m_bGpuAdapterChangePending = m_nCurrentAdapter != m_nPreferredAdapter;
+		m_bDecoderAdapterMismatch = pContext && m_bGpuAdapterChangePending;
 		m_VendorId = dxgiAdapterDesc.VendorId;
 		m_strAdapterDescription = std::format(L"{} ({:04X}:{:04X})", dxgiAdapterDesc.Description, dxgiAdapterDesc.VendorId, dxgiAdapterDesc.DeviceId);
 		DLog(L"Graphics DXGI adapter: {}", m_strAdapterDescription);
@@ -1439,6 +1518,10 @@ HRESULT CDX11VideoProcessor::SetDevice(ID3D11Device *pDevice, ID3D11DeviceContex
 			m_TexDither.Release();
 		}
 	}
+
+#ifdef _WIN64
+	InterpInit();
+#endif
 
 	m_pFilter->OnDisplayModeChange();
 	UpdateStatsStatic();
@@ -1989,7 +2072,12 @@ HRESULT CDX11VideoProcessor::InitializeD3D11VP(const FmtConvParams_t& params, co
 	auto rtxHDR = m_bVPRTXVideoHDR && m_bHdrPassthroughSupport && m_bHdrPassthrough && m_iTexFormat != TEXFMT_8INT && !SourceIsHDR();
 	m_bVPUseRTXVideoHDR = (m_D3D11VP.SetRTXVideoHDR(rtxHDR) == S_OK);
 
-	auto superRes = (m_bVPScaling && (m_InternalTexFmt == DXGI_FORMAT_B8G8R8A8_UNORM || m_bVPUseRTXVideoHDR) && (params.CDepth == 8 || !m_bACMEnabled)) ? m_iVPSuperRes : SUPERRES_Disable;
+#ifdef _WIN64
+	const bool allowSuperRes = !m_bInterp;
+#else
+	const bool allowSuperRes = true;
+#endif
+	auto superRes = (m_bVPScaling && allowSuperRes && (m_InternalTexFmt == DXGI_FORMAT_B8G8R8A8_UNORM || m_bVPUseRTXVideoHDR) && (params.CDepth == 8 || !m_bACMEnabled)) ? m_iVPSuperRes : SUPERRES_Disable;
 	m_bVPUseSuperRes = (m_D3D11VP.SetSuperRes(superRes) == S_OK);
 
 	if ((m_bVPUseRTXVideoHDR && !m_pDXGISwapChain4)
@@ -2151,7 +2239,6 @@ HRESULT CDX11VideoProcessor::ProcessSample(IMediaSample* pSample)
 	rtEnd = rtStart + rtFrameDur;
 
 	m_rtStart = rtStart;
-	CRefTime rtClock(rtStart);
 
 	HRESULT hr = CopySample(pSample);
 	if (FAILED(hr)) {
@@ -2159,20 +2246,15 @@ HRESULT CDX11VideoProcessor::ProcessSample(IMediaSample* pSample)
 		return hr;
 	}
 
+#ifdef _WIN64
+	if (InterpActive()) {
+		return ProcessSampleInterp(rtStart, rtFrameDur);
+	}
+#endif
+
 	// always Render(1) a frame after CopySample()
 	hr = Render(1, rtStart);
-	m_pFilter->m_DrawStats.Add(GetPreciseTick());
-	if (m_pFilter->m_filterState == State_Running) {
-		m_pFilter->StreamTime(rtClock);
-	}
-
-	m_RenderStats.syncoffset = rtClock - rtStart;
-
-	int so = (int)std::clamp(m_RenderStats.syncoffset, -UNITS, UNITS);
-#if SYNC_OFFSET_EX
-	m_SyncDevs.Add(so - m_Syncs.Last());
-#endif
-	m_Syncs.Add(so);
+	const CRefTime rtClock = AfterPresent(rtStart);
 
 	if (m_bDoubleFrames) {
 		if (rtEnd < rtClock) {
@@ -2183,21 +2265,30 @@ HRESULT CDX11VideoProcessor::ProcessSample(IMediaSample* pSample)
 		rtStart += rtFrameDur / 2;
 
 		hr = Render(2, rtStart);
-		m_pFilter->m_DrawStats.Add(GetPreciseTick());
-		if (m_pFilter->m_filterState == State_Running) {
-			m_pFilter->StreamTime(rtClock);
-		}
-
-		m_RenderStats.syncoffset = rtClock - rtStart;
-
-		so = (int)std::clamp(m_RenderStats.syncoffset, -UNITS, UNITS);
-#if SYNC_OFFSET_EX
-		m_SyncDevs.Add(so - m_Syncs.Last());
-#endif
-		m_Syncs.Add(so);
+		AfterPresent(rtStart);
 	}
 
 	return hr;
+}
+
+CRefTime CDX11VideoProcessor::AfterPresent(const REFERENCE_TIME rtStart)
+{
+	CRefTime rtClock(rtStart);
+
+	m_pFilter->m_DrawStats.Add(GetPreciseTick());
+	if (m_pFilter->m_filterState == State_Running) {
+		m_pFilter->StreamTime(rtClock);
+	}
+
+	m_RenderStats.syncoffset = rtClock - rtStart;
+
+	const int so = (int)std::clamp(m_RenderStats.syncoffset, -UNITS, UNITS);
+#if SYNC_OFFSET_EX
+	m_SyncDevs.Add(so - m_Syncs.Last());
+#endif
+	m_Syncs.Add(so);
+
+	return rtClock;
 }
 
 HRESULT CDX11VideoProcessor::CopySample(IMediaSample* pSample)
@@ -2740,6 +2831,10 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 		hr = Process(pBackBuffer, m_srcRect, m_videoRect, m_FieldDrawn == 2);
 	}
 
+#ifdef _WIN64
+	DrawInterpStatusOsd(pBackBuffer);
+#endif
+
 	if (!m_pPSHalfOUtoInterlace) {
 		DrawSubtitles(pBackBuffer);
 	}
@@ -2747,7 +2842,6 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 	if (m_bShowStats) {
 		hr = DrawStats(pBackBuffer);
 	}
-
 	if (m_bAlphaBitmapEnable) {
 		D3D11_TEXTURE2D_DESC desc;
 		pBackBuffer->GetDesc(&desc);
@@ -2763,7 +2857,6 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 			m_pAlphaBitmapVertex, &VP,
 			m_pSamplerLinear);
 	}
-
 #if 0
 	{ // Tearing test (very non-optimal implementation, use only for tests)
 		static int nTearingPos = 0;
@@ -2799,17 +2892,23 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 	uint64_t tick3 = GetPreciseTick();
 	m_RenderStats.paintticks = tick3 - tick1;
 
-	if (m_bVBlankBeforePresent && m_pDXGIOutput) {
+#ifdef _WIN64
+	const bool refreshInterpolationPresent = m_pInterpPresent
+		&& InterpUsesDisplayRefresh() && InterpActive();
+#else
+	const bool refreshInterpolationPresent = false;
+#endif
+	if (!refreshInterpolationPresent && m_bVBlankBeforePresent && m_pDXGIOutput) {
 		hr = m_pDXGIOutput->WaitForVBlank();
 		DLogIf(FAILED(hr), L"WaitForVBlank failed with error {}", HR2Str(hr));
 	}
 
-	if (m_bAdjustPresentTime) {
+	if (m_bAdjustPresentTime || refreshInterpolationPresent) {
 		SyncFrameToStreamTime(frameStartTime);
 	}
 
 	g_bPresent = true;
-	hr = m_pDXGISwapChain1->Present(1, 0);
+	hr = m_pDXGISwapChain1->Present(refreshInterpolationPresent ? 0 : 1, 0);
 	g_bPresent = false;
 	DLogIf(FAILED(hr), L"CDX11VideoProcessor::Render() : Present() failed with error {}", HR2Str(hr));
 
@@ -2848,6 +2947,10 @@ HRESULT CDX11VideoProcessor::FillBlack()
 		hr = DrawStats(pBackBuffer);
 	}
 
+#ifdef _WIN64
+	DrawInterpStatusOsd(pBackBuffer);
+#endif
+
 	if (m_bAlphaBitmapEnable) {
 		D3D11_TEXTURE2D_DESC desc;
 		pBackBuffer->GetDesc(&desc);
@@ -2863,7 +2966,6 @@ HRESULT CDX11VideoProcessor::FillBlack()
 			m_pAlphaBitmapVertex, &VP,
 			m_pSamplerLinear);
 	}
-
 	g_bPresent = true;
 	hr = m_pDXGISwapChain1->Present(1, 0);
 	g_bPresent = false;
@@ -2899,6 +3001,10 @@ void CDX11VideoProcessor::UpdateTexures()
 	else {
 		hr = m_TexConvertOutput.CheckCreate(m_pDevice, m_InternalTexFmt, m_srcRectWidth, m_srcRectHeight, Tex2D_DefaultShaderRTarget);
 	}
+
+#ifdef _WIN64
+	InterpUpdateTextures();
+#endif
 }
 
 void CDX11VideoProcessor::UpdatePostScaleTexures()
@@ -3065,11 +3171,14 @@ HRESULT CDX11VideoProcessor::ConvertColorPass(ID3D11Texture2D* pRenderTarget)
 		return hr;
 	}
 
+	D3D11_TEXTURE2D_DESC rtDesc;
+	pRenderTarget->GetDesc(&rtDesc);
+
 	D3D11_VIEWPORT VP;
 	VP.TopLeftX = 0;
 	VP.TopLeftY = 0;
-	VP.Width = (FLOAT)m_TexConvertOutput.desc.Width;
-	VP.Height = (FLOAT)m_TexConvertOutput.desc.Height;
+	VP.Width = (FLOAT)rtDesc.Width;
+	VP.Height = (FLOAT)rtDesc.Height;
 	VP.MinDepth = 0.0f;
 	VP.MaxDepth = 1.0f;
 
@@ -3301,6 +3410,14 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 	CRect rSrc = srcRect;
 	Tex2D_t* pInputTexture = nullptr;
 
+#ifdef _WIN64
+	if (m_pInterpPresent && InterpActive()) {
+		m_bVPScalingUseShaders = m_D3D11VP.IsReady();
+		const CRect rect(0, 0, m_pInterpPresent->desc.Width, m_pInterpPresent->desc.Height);
+		return ProcessTail(m_pInterpPresent, rect, m_iInterpRotation, pRenderTarget, dstRect);
+	}
+#endif
+
 	const UINT numSteps = GetPostScaleSteps();
 
 	if (m_D3D11VP.IsReady()) {
@@ -3331,6 +3448,14 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 	else {
 		pInputTexture = &m_TexSrcVideo;
 	}
+
+	return ProcessTail(pInputTexture, rSrc, rotation, pRenderTarget, dstRect);
+}
+
+HRESULT CDX11VideoProcessor::ProcessTail(Tex2D_t* pInputTexture, const CRect& rSrc, const int rotation, ID3D11Texture2D* pRenderTarget, const CRect& dstRect)
+{
+	HRESULT hr = S_OK;
+	const UINT numSteps = GetPostScaleSteps();
 
 	if (numSteps) {
 		UINT step = 0;
@@ -3428,7 +3553,7 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 		hr = ResizeShaderPass(*pInputTexture, pRenderTarget, rSrc, dstRect, rotation);
 	}
 
-	DLogIf(FAILED(hr), L"CDX11VideoProcessor::Process() : failed with error {}", HR2Str(hr));
+	DLogIf(FAILED(hr), L"CDX11VideoProcessor::ProcessTail() : failed with error {}", HR2Str(hr));
 
 	return hr;
 }
@@ -3564,7 +3689,16 @@ HRESULT CDX11VideoProcessor::GetCurentImage(long *pDIBImage)
 	auto pSub11CallBack = m_pFilter->m_pSub11CallBack;
 	m_pFilter->m_pSub11CallBack = nullptr;
 
+#ifdef _WIN64
+	// A screenshot is a capture of the decoded source frame, not of a transient
+	// interpolated presentation buffer.
+	Tex2D_t* const pSavedInterpPresent = m_pInterpPresent;
+	m_pInterpPresent = nullptr;
+#endif
 	hr = Process(pRGB32Texture2D, m_srcRect, imageRect, false);
+#ifdef _WIN64
+	m_pInterpPresent = pSavedInterpPresent;
+#endif
 
 	m_pFilter->m_pSub11CallBack = pSub11CallBack;
 
@@ -3697,6 +3831,7 @@ HRESULT CDX11VideoProcessor::GetVPInfo(std::wstring& str)
 {
 	str = L"DirectX 11";
 	str += std::format(L"\nGraphics adapter: {}", m_strAdapterDescription);
+	str += L"\nGPU selection   : " + GpuSelectionStatus();
 	str.append(L"\nVideoProcessor  : ");
 	if (m_D3D11VP.IsReady()) {
 		D3D11_VIDEO_PROCESSOR_CAPS caps;
@@ -3724,6 +3859,15 @@ HRESULT CDX11VideoProcessor::GetVPInfo(std::wstring& str)
 	}
 
 	str.append(m_strStatsDispInfo);
+
+#ifdef _WIN64
+	if (m_bInterp) {
+		std::wstring strInterp;
+		GetInterpolationStatus(strInterp);
+		str_replace(strInterp, L"\n", L"\n  ");
+		str += L"\n\nFrame interpolation: " + strInterp;
+	}
+#endif
 
 	if (m_pPostScaleShaders.size()) {
 		str.append(L"\n\nPost scale pixel shaders:");
@@ -3823,9 +3967,47 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 	bool changeSuperRes          = false;
 	bool changeRTXVideoHDR       = false;
 	bool changeLuminanceParams   = false;
+	bool changeInterp            = false;
+	const bool gpuAdapterChanged = config.iGpuAdapter != m_iGpuAdapter;
+#ifdef _WIN64
+	const bool interpEnableChanged = config.bInterp != m_bInterp;
+	const bool interpThresholdChanged = config.iInterpSceneThreshold != m_iInterpSceneThreshold;
+	const bool interpProfileChanged = config.iInterpDefaultOutput != m_iInterpDefaultOutput
+		|| config.interpProfiles != m_InterpProfiles;
+#endif
 
 	// settings that do not require preparation
 	m_bShowStats           = config.bShowStats;
+	m_iInterpDefaultOutput = config.iInterpDefaultOutput;
+	m_InterpProfiles       = config.interpProfiles;
+	if (gpuAdapterChanged) {
+		m_iGpuAdapter = config.iGpuAdapter;
+		ResolvePreferredAdapter();
+		m_bGpuAdapterChangePending = m_nCurrentAdapter != m_nPreferredAdapter;
+		m_bDecoderAdapterMismatch = false;
+	}
+
+	if (config.bInterp != m_bInterp
+			|| config.bInterpFP16 != m_bInterpFP16
+			|| config.iInterpPadMultiple != m_iInterpPadMultiple
+			|| config.strInterpModel != m_strInterpModel
+			|| config.strInterpTrtDir != m_strInterpTrtDir) {
+		m_bInterp               = config.bInterp;
+		m_bInterpFP16           = config.bInterpFP16;
+		m_iInterpPadMultiple    = config.iInterpPadMultiple;
+		m_strInterpModel        = config.strInterpModel;
+		m_strInterpTrtDir       = config.strInterpTrtDir;
+		changeInterp = true;
+	}
+	m_iInterpSceneThreshold = config.iInterpSceneThreshold;
+#ifdef _WIN64
+	if (interpThresholdChanged && m_pRife) {
+		m_pRife->SetSceneThreshold(InterpSceneThresholdRatio(m_iInterpSceneThreshold));
+	}
+	if (interpEnableChanged) {
+		changeSuperRes = true;
+	}
+#endif
 	m_bDeintDouble         = config.bDeintDouble;
 	m_bInterpolateAt50pct  = config.bInterpolateAt50pct;
 	m_bVBlankBeforePresent = config.bVBlankBeforePresent;
@@ -3963,10 +4145,24 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 	}
 
 	if (!m_pFilter->GetActive()) {
+		if (gpuAdapterChanged) {
+			const HRESULT hr = ApplyPreferredAdapter();
+			DLogIf(FAILED(hr), L"CDX11VideoProcessor::Configure() : failed to apply GPU adapter with error {}", HR2Str(hr));
+		}
 		return;
 	}
 
 	// apply new settings
+
+#ifdef _WIN64
+	if (changeInterp) {
+		InterpInit();
+		UpdateStatsStatic();
+	} else if (interpProfileChanged) {
+		InterpUpdateTextures();
+		Flush();
+	}
+#endif
 
 	if (changeWindow) {
 		ReleaseSwapChain();
@@ -4052,7 +4248,12 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 	}
 
 	if (changeSuperRes) {
-		auto superRes = (m_bVPScaling && (m_srcParams.CDepth == 8 || !m_bACMEnabled)) ? m_iVPSuperRes : SUPERRES_Disable;
+#ifdef _WIN64
+		const bool allowSuperRes = !m_bInterp;
+#else
+		const bool allowSuperRes = true;
+#endif
+		auto superRes = (m_bVPScaling && allowSuperRes && (m_srcParams.CDepth == 8 || !m_bACMEnabled)) ? m_iVPSuperRes : SUPERRES_Disable;
 		m_bVPUseSuperRes = (m_D3D11VP.SetSuperRes(superRes) == S_OK);
 	}
 
@@ -4061,10 +4262,20 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 
 void CDX11VideoProcessor::SetRotation(int value)
 {
+	const bool changed = m_iRotation != value;
 	m_iRotation = value;
 	if (m_D3D11VP.IsReady()) {
 		m_D3D11VP.SetRotation(static_cast<D3D11_VIDEO_PROCESSOR_ROTATION>(value / 90));
 	}
+#ifdef _WIN64
+	if (changed) {
+		InterpUpdateTextures();
+		m_InterpHist.valid = false;
+		m_InterpHist.presented[0] = m_InterpHist.presented[1] = false;
+		m_pInterpPresent = nullptr;
+		m_rtInterpNextOut = INVALID_TIME;
+	}
+#endif
 }
 
 void CDX11VideoProcessor::SetStereo3dTransform(int value)
@@ -4090,10 +4301,607 @@ void CDX11VideoProcessor::Flush()
 	m_rtStart = 0;
 
 	m_DoviExtensionMetadata = {};
+#ifdef _WIN64
+	m_InterpHist.valid = false;
+	m_InterpHist.presented[0] = m_InterpHist.presented[1] = false;
+	m_rtInterpNextOut = INVALID_TIME;
+	m_pInterpPresent = nullptr;
+	m_iInterpFactor = 1;
+	m_nInterpEosPresents = 0;
+	m_nInterpGenerated = 0;
+	m_nInterpPresented = 0;
+	m_nInterpPlanned = 0;
+	m_nInterpLateDrops = 0;
+#endif
 #ifndef NDEBUG
 	UpdateStatsStatic();
 #endif
 }
+
+#ifdef _WIN64
+
+void CDX11VideoProcessor::InterpInit()
+{
+	InterpRelease();
+	m_strInterpStatus.clear();
+
+	if (!m_bInterp || !m_pDevice) {
+		return;
+	}
+	if (m_srcRectWidth && m_srcRectHeight && InterpProfileValue() == INTERP_PROFILE_DISABLE) {
+		return;
+	}
+	const std::wstring model = InterpProfileModel();
+	m_strInterpActiveModel = model;
+	if (m_VendorId != PCIV_NVIDIA) {
+		m_strInterpStatus = L"requires an NVIDIA GPU";
+		return;
+	}
+	if (model.empty()) {
+		m_strInterpStatus = L"no ONNX model selected";
+		return;
+	}
+
+	RifeConfig config;
+	config.onnxPath = model;
+	config.trtDir = m_strInterpTrtDir;
+	config.fp16 = m_bInterpFP16;
+	config.padMultiple = m_iInterpPadMultiple;
+	config.sceneThreshold = InterpSceneThresholdRatio(m_iInterpSceneThreshold);
+
+	auto rife = std::make_unique<CRifeInterpolator>();
+	std::wstring error;
+	if (FAILED(rife->Init(m_pDevice, m_pDeviceContext, config, error))) {
+		m_strInterpStatus = error;
+		return;
+	}
+	m_pRife = std::move(rife);
+	InterpUpdateTextures();
+}
+
+void CDX11VideoProcessor::InterpRelease()
+{
+	m_pRife.reset();
+	m_strInterpActiveModel.clear();
+	m_InterpHist.tex[0].Release();
+	m_InterpHist.tex[1].Release();
+	m_InterpHist.valid = false;
+	m_InterpHist.presented[0] = m_InterpHist.presented[1] = false;
+	m_TexInterpOut.Release();
+	m_pInterpPresent = nullptr;
+	m_rtInterpNextOut = INVALID_TIME;
+	m_bInterpReady = false;
+	m_iInterpFactor = 1;
+	m_nInterpEosPresents = 0;
+	m_nInterpGenerated = 0;
+	m_nInterpPresented = 0;
+	m_nInterpPlanned = 0;
+	m_nInterpLateDrops = 0;
+	m_interpErrorOsdStartTick = 0;
+}
+
+void CDX11VideoProcessor::InterpUpdateTextures()
+{
+	if (!m_srcRectWidth || !m_srcRectHeight) {
+		return;
+	}
+	if (InterpProfileValue() == INTERP_PROFILE_DISABLE) {
+		InterpRelease();
+		return;
+	}
+	const std::wstring model = InterpProfileModel();
+	if (m_strInterpActiveModel != model) {
+		InterpInit();
+		return;
+	}
+	if (!m_pRife) {
+		return;
+	}
+
+	UINT w = m_srcRectWidth;
+	UINT h = m_srcRectHeight;
+	if (m_D3D11VP.IsReady() && (m_iRotation == 90 || m_iRotation == 270)) {
+		std::swap(w, h); // D3D11 VP bakes rotation into the history texture
+	}
+	const auto& desc = m_InterpHist.tex[0].desc;
+	const bool changed = desc.Width != w || desc.Height != h || desc.Format != m_InternalTexFmt;
+
+	HRESULT hr = m_InterpHist.tex[0].CheckCreate(m_pDevice, m_InternalTexFmt, w, h, Tex2D_DefaultShaderRTarget);
+	if (SUCCEEDED(hr)) {
+		hr = m_InterpHist.tex[1].CheckCreate(m_pDevice, m_InternalTexFmt, w, h, Tex2D_DefaultShaderRTarget);
+	}
+	if (SUCCEEDED(hr)) {
+		hr = m_TexInterpOut.CheckCreate(m_pDevice, m_InternalTexFmt, w, h, Tex2D_DefaultShaderRTarget);
+	}
+	if (FAILED(hr)) {
+		DLog(L"CDX11VideoProcessor::InterpUpdateTextures() : texture creation failed with error {}", HR2Str(hr));
+		InterpRelease();
+		m_strInterpStatus = L"texture creation failed: " + HR2Str(hr);
+		return;
+	}
+
+	if (changed) {
+		m_InterpHist.valid = false;
+		m_pInterpPresent = nullptr;
+		m_bInterpReady = false;
+		m_pRife->SetFrameSize(w, h);
+	}
+}
+
+bool CDX11VideoProcessor::InterpActive() const
+{
+	if (InterpProfileValue() == INTERP_PROFILE_DISABLE
+			|| !m_pRife || !m_TexInterpOut.pTexture || !m_InterpHist.tex[0].pTexture || !m_InterpHist.tex[1].pTexture
+			|| m_SampleFormat != D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE || m_bDoubleFrames) {
+		return false;
+	}
+	if (InterpUsesDisplayRefresh() && m_rtRefreshPeriod <= 0) {
+		return false;
+	}
+	if (m_rtRefreshPeriod > 0) {
+		const REFERENCE_TIME frameDuration = m_pFilter->m_FrameStats.GetAverageFrameDuration();
+		if (InterpUsesDisplayRefresh()) {
+			return frameDuration > m_rtRefreshPeriod;
+		}
+		return InterpEffectiveMultiplier(frameDuration) > 1;
+	}
+	return true;
+}
+
+const InterpProfile_t* CDX11VideoProcessor::InterpProfile() const
+{
+	const unsigned long long pixels = static_cast<unsigned long long>(m_srcRectWidth) * m_srcRectHeight;
+	return FindNearestInterpProfile(m_InterpProfiles, pixels);
+}
+
+int CDX11VideoProcessor::InterpProfileValue() const
+{
+	const auto* profile = InterpProfile();
+	return profile ? profile->output : m_iInterpDefaultOutput;
+}
+
+std::wstring CDX11VideoProcessor::InterpProfileModel() const
+{
+	const auto* profile = InterpProfile();
+	return profile && !profile->model.empty() ? profile->model : m_strInterpModel;
+}
+
+std::wstring CDX11VideoProcessor::InterpProfileLabel() const
+{
+	const auto* profile = InterpProfile();
+	return profile ? std::format(L"{}x{} override", profile->width, profile->height) : L"default";
+}
+
+bool CDX11VideoProcessor::InterpUsesDisplayRefresh() const
+{
+	return InterpProfileValue() == INTERP_PROFILE_DISPLAY_REFRESH;
+}
+
+int CDX11VideoProcessor::InterpEffectiveMultiplier(const REFERENCE_TIME rtFrameDur) const
+{
+	if (InterpUsesDisplayRefresh() && m_rtRefreshPeriod <= 0) {
+		return 1;
+	}
+	int multiplier = std::clamp(InterpProfileValue(), INTERP_MULT_MIN, INTERP_MULT_MAX);
+	if (m_rtRefreshPeriod > 0 && rtFrameDur > 0) {
+		// Present(1, 0) can not show more frames than the display refreshes
+		const double refreshRate = static_cast<double>(UNITS) / m_rtRefreshPeriod;
+		const double inputRate = static_cast<double>(UNITS) / rtFrameDur;
+		const int maxMultiplier = static_cast<int>(std::floor((refreshRate + 0.5) / inputRate));
+		multiplier = std::min(multiplier, std::max(1, maxMultiplier));
+	}
+	return multiplier;
+}
+
+void CDX11VideoProcessor::BuildInterpSlots(const REFERENCE_TIME rtPrev, const REFERENCE_TIME rtCur, const REFERENCE_TIME rtFrameDur, std::vector<InterpSlot>& slots)
+{
+	slots.clear();
+	const REFERENCE_TIME gap = rtCur - rtPrev;
+
+	if (InterpUsesDisplayRefresh() && m_rtRefreshPeriod > 0) {
+		// one output frame per display refresh, timestep from the position between the source frames
+		if (m_rtInterpNextOut == INVALID_TIME || m_rtInterpNextOut < rtPrev - m_rtRefreshPeriod || m_rtInterpNextOut > rtPrev + m_rtRefreshPeriod) {
+			m_rtInterpNextOut = rtPrev;
+		}
+		REFERENCE_TIME rt = m_rtInterpNextOut;
+		for (; rt < rtCur && slots.size() < 16; rt += m_rtRefreshPeriod) {
+			slots.push_back({ rt, (float)((double)(rt - rtPrev) / gap) });
+		}
+		m_rtInterpNextOut = rt;
+	} else {
+		const int multiplier = InterpEffectiveMultiplier(rtFrameDur);
+		for (int k = 0; k < multiplier; k++) {
+			slots.push_back({ rtPrev + gap * k / multiplier, (float)k / multiplier });
+		}
+	}
+
+	if (!slots.empty() && slots[0].timestep < 0.02f) {
+		slots[0].timestep = 0.0f;
+	}
+}
+
+HRESULT CDX11VideoProcessor::ProduceVideoFrame(Tex2D_t& dst)
+{
+	const CRect rect(0, 0, dst.desc.Width, dst.desc.Height);
+
+	if (m_D3D11VP.IsReady()) {
+		m_iInterpRotation = 0;
+		return D3D11VPPass(dst.pTexture, m_srcRect, rect, false);
+	}
+
+	m_iInterpRotation = m_iRotation;
+	if (m_PSConvColorData.bEnable) {
+		return ConvertColorPass(dst.pTexture);
+	}
+	return TextureCopyRect(m_TexSrcVideo, dst.pTexture, m_srcRect, rect, m_pPS_Simple, nullptr, 0, false);
+}
+
+HRESULT CDX11VideoProcessor::ProcessSampleInterp(const REFERENCE_TIME rtCur, const REFERENCE_TIME rtFrameDur)
+{
+	auto& hist = m_InterpHist;
+	m_RenderStats.interpticks = 0;
+	const int cur = hist.next;
+	const int prev = cur ^ 1;
+
+	HRESULT hr = ProduceVideoFrame(hist.tex[cur]);
+	if (FAILED(hr)) {
+		m_RenderStats.failed++;
+		return hr;
+	}
+	// Shader-based conversion/copy leaves dst bound as an OM render target.
+	// SetPair reads that same history texture as a compute SRV; D3D11 resolves
+	// the read/write hazard by binding a null SRV unless the target is released.
+	m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+	hist.rt[cur] = rtCur;
+	hist.presented[cur] = false;
+
+	const bool running = m_pFilter->m_filterState == State_Running;
+	const REFERENCE_TIME rtPrev = hist.rt[prev];
+	const REFERENCE_TIME gap = rtCur - rtPrev;
+	m_bInterpReady = m_pRife->IsReady();
+
+	bool pairOK = hist.valid && running && m_bInterpReady && gap > 0 && gap <= 4 * rtFrameDur;
+	if (pairOK) {
+		const uint64_t tick = GetPreciseTick();
+		pairOK = SUCCEEDED(m_pRife->SetPair(hist.tex[prev].pShaderResource, hist.tex[cur].pShaderResource));
+		m_RenderStats.interpticks += GetPreciseTick() - tick;
+	}
+
+	if (!pairOK) {
+		// nothing to pair with: show the new frame at its own time
+		m_iInterpFactor = 1;
+		m_nInterpGenerated = 0;
+		m_nInterpPlanned = 1;
+		m_nInterpLateDrops = 0;
+		m_pInterpPresent = &hist.tex[cur];
+		hr = Render(1, rtCur);
+		AfterPresent(rtCur);
+		m_nInterpPresented = SUCCEEDED(hr) ? 1 : 0;
+		hist.presented[cur] = true;
+		hist.valid = SUCCEEDED(hr);
+		hist.next = prev;
+		return hr;
+	}
+	const bool sceneCut = m_pRife->IsSceneCut();
+
+	std::vector<InterpSlot> slots;
+	BuildInterpSlots(rtPrev, rtCur, rtFrameDur, slots);
+	m_iInterpFactor = (int)slots.size();
+	m_nInterpGenerated = 0;
+	m_nInterpPresented = 0;
+	m_nInterpPlanned = 0;
+	m_nInterpLateDrops = 0;
+	if (slots.empty()) {
+		// In refresh-rate mode an input interval can contain no display slot
+		// (for example 120 fps input on a 60 Hz display). Do not invent an
+		// extra presentation: retain the current frame for the next interval.
+		hist.presented[prev] = true;
+		hist.valid = true;
+		hist.next = prev;
+		return S_OK;
+	}
+
+	bool firstPresent = true;
+	for (size_t i = 0; i < slots.size(); i++) {
+		const auto& slot = slots[i];
+		if (slot.timestep == 0.0f && hist.presented[prev]) {
+			continue; // the source frame was already shown before interpolation became active
+		}
+		m_nInterpPlanned++;
+		if (i > 0) {
+			CRefTime rtClock;
+			m_pFilter->StreamTime(rtClock);
+			if (slot.rt + gap / (2 * (LONGLONG)slots.size()) < rtClock) {
+				m_RenderStats.dropped2++;
+				m_nInterpLateDrops++;
+				continue;
+			}
+		}
+
+		Tex2D_t* pTex = &hist.tex[prev];
+		if (slot.timestep > 0.0f && !sceneCut) {
+			const uint64_t tick = GetPreciseTick();
+			if (SUCCEEDED(m_pRife->Infer(slot.timestep, m_TexInterpOut.pTexture))) {
+				pTex = &m_TexInterpOut;
+				m_nInterpGenerated++;
+			} else {
+				m_RenderStats.failed++;
+			}
+			m_RenderStats.interpticks += GetPreciseTick() - tick;
+		}
+
+		m_pInterpPresent = pTex;
+		m_rtStart = slot.rt;
+		hr = Render(1, slot.rt);
+		AfterPresent(slot.rt);
+		if (SUCCEEDED(hr)) {
+			m_nInterpPresented++;
+		}
+		if (firstPresent) {
+			firstPresent = false;
+			m_pFilter->OnFirstPresentDone();
+		}
+	}
+
+	hist.presented[prev] = true;
+	hist.valid = true;
+	hist.next = prev;
+	return hr;
+}
+
+bool CDX11VideoProcessor::GetDoubleRate()
+{
+	if (m_bDoubleFrames) {
+		return true;
+	}
+	if (!m_bInterpReady || !InterpActive()) {
+		return false;
+	}
+	if (!InterpUsesDisplayRefresh()) {
+		return InterpEffectiveMultiplier(m_pFilter->m_FrameStats.GetAverageFrameDuration()) == 2;
+	}
+	return m_iInterpFactor == 2;
+}
+
+REFERENCE_TIME CDX11VideoProcessor::GetScheduleAdvance()
+{
+	if (InterpActive() && m_bInterpReady && m_InterpHist.valid) {
+		return m_pFilter->m_FrameStats.GetAverageFrameDuration();
+	}
+	return 0;
+}
+
+void CDX11VideoProcessor::PresentPending()
+{
+	auto& hist = m_InterpHist;
+	const int last = hist.next ^ 1;
+	if (!InterpActive() || !hist.valid || hist.presented[last]) {
+		return;
+	}
+	m_pInterpPresent = &hist.tex[last];
+	m_rtStart = hist.rt[last];
+	const HRESULT hr = Render(1, hist.rt[last]);
+	if (SUCCEEDED(hr)) {
+		AfterPresent(hist.rt[last]);
+		hist.presented[last] = true;
+		m_nInterpEosPresents++;
+	} else {
+		m_RenderStats.failed++;
+	}
+}
+
+void CDX11VideoProcessor::GetInterpolationStatus(std::wstring& str)
+{
+	if (!m_bInterp) {
+		str = L"disabled";
+		return;
+	}
+	const std::wstring profileLabel = InterpProfileLabel();
+	if (InterpProfileValue() == INTERP_PROFILE_DISABLE) {
+		str = std::format(L"disabled for {} (source {}x{})", profileLabel, m_srcRectWidth, m_srcRectHeight);
+		return;
+	}
+	if (!m_pRife) {
+		str = m_strInterpStatus.empty() ? L"not initialized" : m_strInterpStatus;
+		return;
+	}
+	str = m_pRife->GetStatusText();
+	if (!InterpActive()) {
+		if (m_SampleFormat != D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE || m_bDoubleFrames) {
+			str += L"\ninactive: interlaced video or double rate deinterlacing";
+		} else {
+			str += L"\ninactive: source frame rate is at or above the display refresh rate";
+		}
+	} else if (m_pRife->GetState() == RifeState::Ready) {
+		const double refreshRate = m_rtRefreshPeriod > 0 ? static_cast<double>(UNITS) / m_rtRefreshPeriod : 0.0;
+		const REFERENCE_TIME frameDuration = m_pFilter->m_FrameStats.GetAverageFrameDuration();
+		const double generatedPerSource = InterpUsesDisplayRefresh() && m_rtRefreshPeriod > 0 && frameDuration > 0
+			? std::max(0.0, static_cast<double>(frameDuration) / m_rtRefreshPeriod - 1.0) : 0.0;
+		const std::wstring mode = InterpUsesDisplayRefresh()
+			? std::format(L"display {:.2f} Hz, target +{:.2f} generated/source; last +{}, {}/{} output, {} late",
+				refreshRate, generatedPerSource, m_nInterpGenerated, m_nInterpPresented, m_nInterpPlanned, m_nInterpLateDrops)
+			: std::format(L"x{}, frames per source frame: {}", InterpProfileValue(), m_iInterpFactor);
+		str += std::format(L"\nprofile {} (source {}x{}), model {}, mode: {}, network time {:.2f} ms, NVOFA {} (threshold {:.1f}%, inliers {:.1f}%, mean cost {:.1f}), cuts {}, EOS presents {}",
+			profileLabel, m_srcRectWidth, m_srcRectHeight, m_pRife->GetModelName(), mode, m_pRife->GetLastGpuMs(), m_pRife->GetSceneDetectorStatus(),
+			m_pRife->GetSceneThreshold() * 100.0f, m_pRife->GetLastSceneInlierRatio() * 100.0f,
+			m_pRife->GetLastSceneMeanCost(), m_pRife->GetSceneCutCount(),
+			m_nInterpEosPresents);
+	}
+	if (m_bGpuAdapterUnavailable || m_bGpuAdapterChangePending || m_bDecoderAdapterMismatch) {
+		str += L"\n" + GpuSelectionStatus();
+	}
+}
+
+std::wstring CDX11VideoProcessor::InterpStatsLine()
+{
+	const std::wstring profileLabel = InterpProfileLabel();
+	if (InterpProfileValue() == INTERP_PROFILE_DISABLE) {
+		return std::format(L"RIFE off ({}, source {}x{})", profileLabel, m_srcRectWidth, m_srcRectHeight);
+	}
+	if (!m_pRife) {
+		return L"RIFE: " + (m_strInterpStatus.empty() ? std::wstring(L"not initialized") : m_strInterpStatus);
+	}
+	if (!InterpActive()) {
+		return (m_SampleFormat != D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE || m_bDoubleFrames)
+			? L"RIFE: off (interlaced)"
+			: L"RIFE: off (source rate >= display refresh)";
+	}
+	if (m_pRife->GetState() == RifeState::Ready) {
+		const std::wstring detectorStatus = m_pRife->GetSceneDetectorStatus();
+		const std::wstring detectorInfo = detectorStatus == L"active"
+			? std::format(L"OFA {:.0f}%", m_pRife->GetLastSceneInlierRatio() * 100.0f)
+			: detectorStatus == L"disabled" ? L"OFA off" : L"OFA unavailable";
+		if (!InterpUsesDisplayRefresh()) {
+			const int requested = std::clamp(InterpProfileValue(), INTERP_MULT_MIN, INTERP_MULT_MAX);
+			const int effective = InterpEffectiveMultiplier(m_pFilter->m_FrameStats.GetAverageFrameDuration());
+			if (requested != effective && m_rtRefreshPeriod > 0) {
+				const double refreshRate = static_cast<double>(UNITS) / m_rtRefreshPeriod;
+				return std::format(L"RIFE {} {} x{} -> x{} ({:.2f} Hz): {:.1f} ms, {}, cuts {}", m_pRife->GetModelName(),
+					profileLabel, requested, effective, refreshRate, m_pRife->GetLastGpuMs(), detectorInfo,
+					m_pRife->GetSceneCutCount());
+			}
+			return std::format(L"RIFE {} {} x{}: {:.1f} ms, {}, cuts {}", m_pRife->GetModelName(), profileLabel, effective,
+				m_pRife->GetLastGpuMs(), detectorInfo, m_pRife->GetSceneCutCount());
+		}
+		const double refreshRate = m_rtRefreshPeriod > 0 ? static_cast<double>(UNITS) / m_rtRefreshPeriod : 0.0;
+		const REFERENCE_TIME frameDuration = m_pFilter->m_FrameStats.GetAverageFrameDuration();
+		const double generatedPerSource = m_rtRefreshPeriod > 0 && frameDuration > 0
+			? std::max(0.0, static_cast<double>(frameDuration) / m_rtRefreshPeriod - 1.0) : 0.0;
+		return std::format(L"RIFE {} {} display {:.2f} Hz: {:.1f} ms, {}"
+			L"\n                target +{:.2f}/source, last +{}, {}/{} output, {} late, cuts {}",
+			m_pRife->GetModelName(), profileLabel, refreshRate, m_pRife->GetLastGpuMs(), detectorInfo,
+			generatedPerSource, m_nInterpGenerated, m_nInterpPresented, m_nInterpPlanned,
+			m_nInterpLateDrops, m_pRife->GetSceneCutCount());
+	}
+	return std::format(L"RIFE {}: {}", m_pRife->GetModelName(), m_pRife->GetStatusText());
+}
+
+HRESULT CDX11VideoProcessor::DrawInterpStatusOsd(ID3D11Texture2D* pRenderTarget)
+{
+	if (!pRenderTarget || !m_pRife || InterpProfileValue() == INTERP_PROFILE_DISABLE || m_windowRect.IsRectEmpty()) {
+		m_interpErrorOsdStartTick = 0;
+		return S_FALSE;
+	}
+
+	const RifeState state = m_pRife->GetState();
+	if (state == RifeState::Building) {
+		m_interpErrorOsdStartTick = 0;
+	} else if (state == RifeState::Failed) {
+		const uint64_t now = GetPreciseTick();
+		if (!m_interpErrorOsdStartTick) {
+			m_interpErrorOsdStartTick = now;
+		}
+		const double elapsed = (now - m_interpErrorOsdStartTick) * GetPreciseSecondsPerTick();
+		if (elapsed >= 30.0) {
+			return S_FALSE;
+		}
+	} else {
+		m_interpErrorOsdStartTick = 0;
+		return S_FALSE;
+	}
+
+	// The renderer statistics already contain the current RIFE state in the
+	// Interpolation line. Drawing the transient status as well would put two
+	// copies of the same information into the statistics rectangle.
+	if (m_bShowStats) {
+		return S_FALSE;
+	}
+
+	CComPtr<ID3D11RenderTargetView> renderTargetView;
+	HRESULT hr = m_pDevice->CreateRenderTargetView(pRenderTarget, nullptr, &renderTargetView);
+	if (FAILED(hr)) {
+		return hr;
+	}
+
+	const std::wstring status = m_pRife->GetStatusText();
+	std::wstring text;
+	if (state == RifeState::Building) {
+		constexpr std::wstring_view prefix = L"building engine ";
+		text = L"RIFE ENGINE  |  ";
+		text += status.starts_with(prefix) ? status.substr(prefix.size()) : status;
+	} else {
+		constexpr std::wstring_view prefix = L"failed: ";
+		text = L"RIFE ERROR  |  ";
+		text += status.starts_with(prefix) ? status.substr(prefix.size()) : status;
+	}
+	D3D11_TEXTURE2D_DESC targetDesc = {};
+	pRenderTarget->GetDesc(&targetDesc);
+	const SIZE targetSize = { static_cast<LONG>(targetDesc.Width), static_cast<LONG>(targetDesc.Height) };
+	constexpr LONG paddingX = 12;
+	constexpr LONG paddingY = 8;
+	constexpr LONG bottomMargin = 24;
+	const LONG maxLineWidth = std::max<LONG>(1, targetSize.cx * 7 / 10 - paddingX * 2);
+	std::vector<std::wstring> lines;
+	std::wstring line;
+	const auto textWidth = [this](const std::wstring& value) {
+		SIZE size = {};
+		return SUCCEEDED(m_Font3D.GetTextExtent(value.c_str(), &size)) ? size.cx : 0L;
+	};
+	for (const wchar_t ch : text) {
+		if (ch == L'\n') {
+			lines.push_back(std::move(line));
+			line.clear();
+			continue;
+		}
+		line += ch;
+		while (line.size() > 1 && textWidth(line) > maxLineWidth) {
+			size_t split = line.size() - 1;
+			while (split > 1 && textWidth(line.substr(0, split)) > maxLineWidth) {
+				--split;
+			}
+			const size_t space = line.rfind(L' ', split);
+			if (space != std::wstring::npos && space > 0) {
+				split = space;
+			}
+			std::wstring wrapped = line.substr(0, split);
+			wrapped.erase(wrapped.find_last_not_of(L' ') + 1);
+			lines.push_back(std::move(wrapped));
+			line.erase(0, split);
+			line.erase(0, line.find_first_not_of(L' '));
+		}
+	}
+	if (!line.empty()) {
+		lines.push_back(std::move(line));
+	}
+
+	LONG textWidthMax = 0;
+	LONG textHeight = 0;
+	for (const auto& textLine : lines) {
+		SIZE lineSize = {};
+		if (SUCCEEDED(m_Font3D.GetTextExtent(textLine.c_str(), &lineSize))) {
+			textWidthMax = std::max(textWidthMax, lineSize.cx);
+			textHeight += lineSize.cy;
+		}
+	}
+	if (!textWidthMax || !textHeight) {
+		return S_FALSE;
+	}
+
+	const LONG panelWidth = std::min(targetSize.cx - 16, textWidthMax + paddingX * 2);
+	const LONG panelHeight = textHeight + paddingY * 2;
+	const LONG panelLeft = (targetSize.cx - panelWidth) / 2;
+	const LONG panelBottom = std::max(panelHeight + 8, targetSize.cy - bottomMargin);
+	const RECT panelRect = { panelLeft, panelBottom - panelHeight, panelLeft + panelWidth, panelBottom };
+	HRESULT drawResult = m_Rect3D.Set(panelRect, targetSize, D3DCOLOR_ARGB(190, 0, 0, 0));
+	if (SUCCEEDED(drawResult)) {
+		drawResult = m_Rect3D.Draw(renderTargetView, targetSize);
+	}
+
+	float y = static_cast<float>(panelRect.top + paddingY);
+	for (const auto& textLine : lines) {
+		SIZE lineSize = {};
+		if (FAILED(m_Font3D.GetTextExtent(textLine.c_str(), &lineSize))) {
+			continue;
+		}
+		const float x = static_cast<float>(targetSize.cx - lineSize.cx) / 2.0f;
+		drawResult = m_Font3D.Draw2DText(renderTargetView, targetSize, x, y,
+			m_dwStatsTextColor, textLine.c_str());
+		y += static_cast<float>(lineSize.cy);
+	}
+	return drawResult;
+}
+
+#endif // _WIN64
 
 void CDX11VideoProcessor::ClearPreScaleShaders()
 {
@@ -4403,6 +5211,11 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget)
 		str.append(L", MMR");
 	}
 	str.append(m_strStatsVProc);
+#ifdef _WIN64
+	if (m_bInterp) {
+		str += L"\nInterpolation : " + InterpStatsLine();
+	}
+#endif
 
 	const UINT dstW = m_videoRect.Width();
 	const UINT dstH = m_videoRect.Height();
@@ -4454,6 +5267,11 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget)
 		m_RenderStats.copyticks    * 1000 / GetPreciseTicksPerSecondI(),
 		m_RenderStats.paintticks   * 1000 / GetPreciseTicksPerSecondI(),
 		m_RenderStats.presentticks * 1000 / GetPreciseTicksPerSecondI());
+#ifdef _WIN64
+	if (m_bInterp) {
+		str += std::format(L", Interp{:3}", m_RenderStats.interpticks * 1000 / GetPreciseTicksPerSecondI());
+	}
+#endif
 
 	str += std::format(L"\nSync offset   : {:+3} ms", (m_RenderStats.syncoffset + 5000) / 10000);
 

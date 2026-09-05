@@ -130,6 +130,22 @@
       <ShaderModel>4.0</ShaderModel>
       <ShaderType>Vertex</ShaderType>
     </FxCompile>
+    <FxCompile Include="d3d11\cs_rife_pack.hlsl">
+      <ShaderModel>5.0</ShaderModel>
+      <ShaderType>Compute</ShaderType>
+    </FxCompile>
+    <FxCompile Include="d3d11\cs_rife_scene.hlsl">
+      <ShaderModel>5.0</ShaderModel>
+      <ShaderType>Compute</ShaderType>
+    </FxCompile>
+    <FxCompile Include="d3d11\ps_rife_unpack.hlsl">
+      <ShaderModel>5.0</ShaderModel>
+      <ShaderType>Pixel</ShaderType>
+    </FxCompile>
+    <FxCompile Include="d3d11\vs_rife_quad.hlsl">
+      <ShaderModel>5.0</ShaderModel>
+      <ShaderType>Vertex</ShaderType>
+    </FxCompile>
     <FxCompile Include="d3d9\convert_color.hlsl">
       <ShaderModel>3.0</ShaderModel>
       <ShaderType>Pixel</ShaderType>
@@ -265,7 +281,7 @@
       <AdditionalOptions>/O2</AdditionalOptions>
     </FxCompile>
     <PostBuildEvent>
-      <Command>compile_shaders.cmd</Command>
+      <Command>call "$(ProjectDir)compile_shaders.cmd"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

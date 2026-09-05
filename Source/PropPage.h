@@ -79,3 +79,51 @@ private:
 	HRESULT OnDisconnect() override;
 	HRESULT OnActivate() override;
 };
+
+#ifdef _WIN64
+
+// CVRInterpPPage
+
+class __declspec(uuid("3E7B9C41-6A2D-4F58-9B0E-1C2D3E4F5A6B"))
+	CVRInterpPPage : public CBasePropertyPage, public CWindow
+{
+	CComQIPtr<IVideoRenderer> m_pVideoRenderer;
+
+	Settings_t m_SetsPP;
+
+	bool m_bActivated = false;
+	std::wstring m_strStatus;
+
+public:
+	CVRInterpPPage(LPUNKNOWN lpunk, HRESULT* phr);
+	~CVRInterpPPage();
+
+private:
+	void SetControls();
+	void EnableControls();
+	void UpdateProfileList();
+	void UpdateStatus();
+	void PopulateGpuAdapters();
+	void AddProfile();
+	void EditProfile();
+	void DeleteProfile();
+	void BrowseModel();
+	void BrowseTrtDir();
+
+	HRESULT OnConnect(IUnknown* pUnknown) override;
+	HRESULT OnDisconnect() override;
+	HRESULT OnActivate() override;
+	HRESULT OnDeactivate() override;
+	void SetDirty() {
+		if (m_bActivated && !m_bDirty) {
+			m_bDirty = TRUE;
+			if (m_pPageSite) {
+				m_pPageSite->OnStatusChange(PROPPAGESTATUS_DIRTY);
+			}
+		}
+	}
+	INT_PTR OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) override;
+	HRESULT OnApplyChanges() override;
+};
+
+#endif // _WIN64
